@@ -2,7 +2,8 @@ mod api;
 mod state;
 mod ws;
 
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 use clap::Parser;
 use tracing::info;
@@ -47,7 +48,12 @@ async fn main() {
         ws::serve(ws_state, ws_host, ws_port).await;
     });
 
-    let app = api::router(state).layer(TraceLayer::new_for_http());
+    let app = api::router(state).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+            .on_request(DefaultOnRequest::new().level(Level::INFO))
+            .on_response(DefaultOnResponse::new().level(Level::INFO)),
+    );
     let http_addr = format!("{}:{}", cli.host, cli.port);
     let listener = tokio::net::TcpListener::bind(&http_addr)
         .await

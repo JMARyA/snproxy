@@ -421,14 +421,18 @@ fn coerce_value(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
 }
 
-/// Normalise an instance identifier to a full hostname.
-/// "cancomdev" → "cancomdev.service-now.com"
-/// "cancomdev.service-now.com" → unchanged
+/// Normalise an instance identifier to a full https:// URL.
+/// "cancomdev"                      → "https://cancomdev.service-now.com"
+/// "cancomdev.service-now.com"      → "https://cancomdev.service-now.com"
+/// "https://cancomdev.service-now.com" → unchanged
 fn normalize_instance(s: &str) -> String {
-    if s.contains('.') {
+    let s = s.trim_end_matches('/');
+    if s.starts_with("https://") || s.starts_with("http://") {
         s.to_string()
+    } else if s.contains('.') {
+        format!("https://{s}")
     } else {
-        format!("{s}.service-now.com")
+        format!("https://{s}.service-now.com")
     }
 }
 
