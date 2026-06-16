@@ -52,11 +52,12 @@ pub async fn list(
         query_string.push_str(&format!("&sysparm_query={sn_query}"));
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
-            "action": "agentQueryRecords",
-            "instance": p.instance,
-            "tableName": table,
+            "action":      "agentQueryRecords",
+            "instance":    instance,
+            "tableName":   table,
             "queryString": query_string,
         }))
         .await?;
@@ -96,14 +97,15 @@ pub async fn get(
         query_params["sysparm_fields"] = json!(p.fields);
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
-            "action": "agentRestApi",
-            "instance": p.instance,
-            "method": "GET",
-            "endpoint": format!("/api/now/table/{table}/{sys_id}"),
+            "action":      "agentRestApi",
+            "instance":    instance,
+            "method":      "GET",
+            "endpoint":    format!("/api/now/table/{table}/{sys_id}"),
             "queryParams": query_params,
-            "appName": "snproxy",
+            "appName":     "snproxy",
         }))
         .await?;
 
@@ -135,10 +137,11 @@ pub async fn create(
         return Err(AppError::BadRequest("fields cannot be empty".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
             "action":   "agentRestApi",
-            "instance": body.instance,
+            "instance": instance,
             "method":   "POST",
             "endpoint": format!("/api/now/table/{table}"),
             "body":     body.fields,
@@ -175,14 +178,15 @@ pub async fn update(
         return Err(AppError::BadRequest("fields cannot be empty".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
-            "action": "agentRestApi",
-            "instance": body.instance,
-            "method": "PATCH",
+            "action":   "agentRestApi",
+            "instance": instance,
+            "method":   "PATCH",
             "endpoint": format!("/api/now/table/{table}/{sys_id}"),
-            "body": body.fields,
-            "appName": "snproxy",
+            "body":     body.fields,
+            "appName":  "snproxy",
         }))
         .await?;
 
@@ -210,13 +214,14 @@ pub async fn delete(
     Path((table, sys_id)): Path<(String, String)>,
     Query(p): Query<DeleteParams>,
 ) -> Result<Json<Value>, AppError> {
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
-            "action": "agentRestApi",
-            "instance": p.instance,
-            "method": "DELETE",
+            "action":   "agentRestApi",
+            "instance": instance,
+            "method":   "DELETE",
             "endpoint": format!("/api/now/table/{table}/{sys_id}"),
-            "appName": "snproxy",
+            "appName":  "snproxy",
         }))
         .await?;
 
@@ -238,10 +243,11 @@ pub async fn schema(
     Path(table): Path<String>,
     Query(p): Query<GetParams>,
 ) -> Result<Json<Value>, AppError> {
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
             "action":    "requestTableStructure",
-            "instance":  p.instance,
+            "instance":  instance,
             "tableName": table,
         }))
         .await?;

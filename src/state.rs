@@ -22,6 +22,9 @@ pub struct AppState {
     /// Every inbound WS message is broadcast here for the SSE stream.
     pub event_tx: broadcast::Sender<Value>,
     pub timeout_secs: u64,
+    /// Cached ServiceNow instance object {url, name, g_ck} received when user runs /token.
+    /// g_ck is the CSRF token required for all SN API calls — treat as a secret.
+    pub sn_instance: Arc<Mutex<Option<Value>>>,
 }
 
 impl AppState {
@@ -32,11 +35,21 @@ impl AppState {
             pending: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             timeout_secs,
+            sn_instance: Arc::new(Mutex::new(None)),
         }
     }
 
     pub async fn connected(&self) -> bool {
         self.ws_tx.lock().await.is_some()
+    }
+
+    /// Returns the cached ServiceNow instance object, or an error if /token hasn't been run yet.
+    pub async fn get_sn_instance(&self) -> Result<Value, AppError> {
+        self.sn_instance
+            .lock()
+            .await
+            .clone()
+            .ok_or(AppError::NoInstance)
     }
 
     /// Send a message to the Helper Tab without waiting for a reply.
@@ -105,6 +118,7 @@ impl AppState {
 #[derive(Debug)]
 pub enum AppError {
     NoClient,
+    NoInstance,
     SendFailed,
     Timeout,
     ChannelClosed,
@@ -118,6 +132,10 @@ impl IntoResponse for AppError {
             AppError::NoClient => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "no Helper Tab connected".to_string(),
+            ),
+            AppError::NoInstance => (
+                StatusCode::PRECONDITION_FAILED,
+                "no ServiceNow session — run /token from your ServiceNow instance first".to_string(),
             ),
             AppError::SendFailed => (
                 StatusCode::SERVICE_UNAVAILABLE,

@@ -40,10 +40,11 @@ pub async fn switch(
         return Err(AppError::BadRequest("value cannot be empty".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
             "action":     "switchContext",
-            "instance":   r.instance,
+            "instance":   instance,
             "switchType": switch_type,
             "value":      r.value,
             "reloadTab":  r.reload_tab,

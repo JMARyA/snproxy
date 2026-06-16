@@ -36,9 +36,10 @@ pub async fn handler(
         return Err(AppError::BadRequest("endpoint cannot be empty".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let mut payload = json!({
         "action":   "agentRestApi",
-        "instance": r.instance,
+        "instance": instance,
         "method":   r.method.to_uppercase(),
         "endpoint": r.endpoint,
         "appName":  "snproxy",

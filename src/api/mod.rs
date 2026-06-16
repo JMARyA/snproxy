@@ -20,12 +20,12 @@ pub fn router(state: AppState) -> Router {
         // health
         .route("/health", get(health::handler))
         // CRUD records + schema inspection
-        .route("/records/{table}", get(records::list))
-        .route("/records/{table}", post(records::create))
-        .route("/records/{table}/schema", get(records::schema))
-        .route("/records/{table}/{sys_id}", get(records::get))
-        .route("/records/{table}/{sys_id}", patch(records::update))
-        .route("/records/{table}/{sys_id}", delete(records::delete))
+        .route("/records/:table", get(records::list))
+        .route("/records/:table", post(records::create))
+        .route("/records/:table/schema", get(records::schema))
+        .route("/records/:table/:sys_id", get(records::get))
+        .route("/records/:table/:sys_id", patch(records::update))
+        .route("/records/:table/:sys_id", delete(records::delete))
         // background scripts & slash commands
         .route("/scripts/bg", post(scripts::bg))
         .route("/scripts/slash", post(scripts::slash))

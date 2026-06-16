@@ -84,6 +84,18 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
 
+                    // Cache ServiceNow instance object when /token is run.
+                    // The Helper Tab sends {instance: {url, name, g_ck}} over WS.
+                    // g_ck is a session CSRF token — log its presence but never its value.
+                    if let Some(inst) = val.get("instance") {
+                        if inst.get("url").is_some() && inst.get("g_ck").is_some() {
+                            let url = inst.get("url").and_then(|u| u.as_str()).unwrap_or("?");
+                            let name = inst.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            info!(%url, %name, "← stored ServiceNow instance (g_ck redacted)");
+                            *state.sn_instance.lock().await = Some(inst.clone());
+                        }
+                    }
+
                     // Route to a specific pending caller if agentRequestId is present
                     if let Some(id) = val.get("agentRequestId").and_then(|v| v.as_str()) {
                         let mut pending = state.pending.lock().await;
@@ -99,8 +111,20 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
                         debug!(%action, "← WS recv (unsolicited)");
                     }
 
-                    // Always broadcast to SSE regardless
-                    let _ = state.event_tx.send(val);
+                    // Broadcast to SSE, redacting g_ck so it never appears in the event stream
+                    let sse_val = if val.pointer("/instance/g_ck").is_some() {
+                        let mut redacted = val.clone();
+                        if let Some(obj) = redacted
+                            .get_mut("instance")
+                            .and_then(|v| v.as_object_mut())
+                        {
+                            obj.insert("g_ck".to_string(), json!("[redacted]"));
+                        }
+                        redacted
+                    } else {
+                        val
+                    };
+                    let _ = state.event_tx.send(sse_val);
                 }
                 Err(e) => {
                     warn!("← WS recv non-JSON ({e}): {}", &text[..text.len().min(120)]);

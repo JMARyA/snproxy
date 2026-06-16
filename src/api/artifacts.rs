@@ -38,10 +38,11 @@ pub async fn create(
         return Err(AppError::BadRequest("fields.name is required".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
             "action":    "createRecord",
-            "instance":  r.instance,
+            "instance":  instance,
             "tableName": r.table,
             "scope":     r.scope,
             "payload":   r.fields,

@@ -26,12 +26,13 @@ pub async fn bg(
         return Err(AppError::BadRequest("script cannot be empty".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let resp = s
         .call(json!({
-            "action": "agentRunBackgroundScript",
-            "instance": r.instance,
-            "script": r.script,
-            "appName": "snproxy",
+            "action":   "agentRunBackgroundScript",
+            "instance": instance,
+            "script":   r.script,
+            "appName":  "snproxy",
         }))
         .await?;
 
@@ -74,11 +75,12 @@ pub async fn slash(
         return Err(AppError::BadRequest("command cannot be empty".into()));
     }
 
+    let instance = s.get_sn_instance().await?;
     let mut payload = json!({
-        "action": "runSlashCommand",
-        "instance": r.instance,
-        "command": r.command,
-        "autoRun": r.auto_run,
+        "action":   "runSlashCommand",
+        "instance": instance,
+        "command":  r.command,
+        "autoRun":  r.auto_run,
     });
     if let Some(url) = r.url {
         payload["url"] = json!(url);

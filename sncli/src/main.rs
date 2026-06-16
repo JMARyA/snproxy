@@ -422,17 +422,19 @@ fn coerce_value(s: &str) -> Value {
 }
 
 /// Normalise an instance identifier to a full https:// URL.
-/// "cancomdev"                      → "https://cancomdev.service-now.com"
-/// "cancomdev.service-now.com"      → "https://cancomdev.service-now.com"
-/// "https://cancomdev.service-now.com" → unchanged
+/// Returns bare hostname so the Helper Tab can prepend https:// itself.
+/// "dev"                         → "dev.service-now.com"
+/// "dev.service-now.com"         → "dev.service-now.com"
+/// "https://dev.service-now.com" → "dev.service-now.com"
 fn normalize_instance(s: &str) -> String {
     let s = s.trim_end_matches('/');
-    if s.starts_with("https://") || s.starts_with("http://") {
+    let s = s.strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    if s.contains('.') {
         s.to_string()
-    } else if s.contains('.') {
-        format!("https://{s}")
     } else {
-        format!("https://{s}.service-now.com")
+        format!("{s}.service-now.com")
     }
 }
 
