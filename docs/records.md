@@ -15,7 +15,7 @@ GET /records/:table
 | param      | required | default                                       | description                                            |
 |------------|----------|-----------------------------------------------|--------------------------------------------------------|
 | `instance` | yes      | —                                             | ServiceNow hostname, e.g. `dev12345.service-now.com`   |
-| `q`        | no       | `""`                                          | SN encoded query, e.g. `active=true^category=software` |
+| `q`        | no       | `""`                                          | [SN encoded query](#encoded-query-syntax), e.g. `active=true^category=software` |
 | `fields`   | no       | `sys_id,name,sys_created_on,sys_updated_on`   | Comma-separated field names                            |
 | `limit`    | no       | `20`                                          | Max records to return                                  |
 | `order_by` | no       | `""`                                          | Appended to query, e.g. `ORDERBYname`                  |
@@ -126,3 +126,64 @@ Returns field metadata for any table — useful before creating or updating reco
   ]
 }
 ```
+
+---
+
+## Encoded query syntax
+
+The `q` parameter uses ServiceNow's **encoded query** format — a compact, URL-safe string that maps directly to SQL `WHERE` clauses. Build one visually by filtering a ServiceNow list view and right-clicking the breadcrumb → **Copy query**.
+
+### Operators
+
+| Operator | Example | Description |
+|----------|---------|-------------|
+| `=` | `priority=1` | Equals |
+| `!=` | `state!=6` | Not equals |
+| `<` `>` `<=` `>=` | `priority<3` | Comparison |
+| `IN` | `stateIN1,2,3` | In comma-separated list |
+| `NOT IN` | `stateNOT IN6,7,8` | Not in list |
+| `STARTSWITH` | `numberSTARTSWITHINC` | Starts with string |
+| `ENDSWITH` | `short_descriptionENDSWITHurgent` | Ends with string |
+| `LIKE` | `short_descriptionLIKEnetwork` | Contains substring |
+| `NOT LIKE` | `short_descriptionNOT LIKEtest` | Does not contain |
+| `ISEMPTY` | `assignment_groupISEMPTY` | Field has no value |
+| `ISNOTEMPTY` | `assignment_groupISNOTEMPTY` | Field has a value |
+| `BETWEEN` | `priorityBETWEEN1@2` | Numeric range (inclusive, `@` separator) |
+| `INSTANCEOF` | `sys_class_nameINSTANCEOFincident` | Filter by table inheritance |
+| `ORDERBY` | `^ORDERBYDESCsys_created_on` | Sorting (in `order_by` param) |
+
+### Combining conditions
+
+| Separator | Meaning | Example |
+|-----------|---------|---------|
+| `^` | AND | `active=true^priority=1` |
+| `^OR` | OR | `state=1^ORstate=2` (field-level OR) |
+| `^NQ` | New query group | `active=true^priority=1^NQstate=3^category=hardware` — OR between condition blocks |
+
+### Reference fields
+
+Use `sys_id` as the value, or dot-walk to a related field:
+
+```
+assignment_group=6816f79cc0a8016401c5a33be04be441
+assignment_group.nameLIKENetwork
+assigned_to.department.nameSTARTSWITHIT
+```
+
+### Dates / relative times
+
+```
+opened_at>=javascript:gs.daysAgoStart(7)
+sys_created_onONThis week@javascript:gs.beginningOfThisWeek()@javascript:gs.endOfThisWeek()
+sys_updated_onONLast month@javascript:gs.beginningOfLastMonth()@javascript:gs.endOfLastMonth()
+```
+
+### Text search
+
+```
+123TEXTQUERY321network outage
+```
+
+### Order of evaluation
+
+Conditions are evaluated left-to-right with no explicit grouping. For complex AND+OR logic, build the filter in the ServiceNow list view and copy the query — the platform handles precedence correctly.
