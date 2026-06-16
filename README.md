@@ -105,226 +105,77 @@ Waiting for SN Utils Helper Tab to connect...
 ```
 
 Open the Helper Tab in Chrome. It will connect automatically (it polls for the WS server).
-The banner in the Helper Tab will update to confirm.
-
-Available flags:
+The banner in the Helper Tab will confirm the connection.
 
 ```
---host <HOST>            Bind address [default: 127.0.0.1]
---ws-port <WS_PORT>      WebSocket port [default: 1978]
---http-port <HTTP_PORT>  HTTP API port [default: 8766]
---timeout <TIMEOUT>      Response wait timeout in seconds [default: 30]
+--host <HOST>       Bind address [default: 127.0.0.1]
+--ws-port <PORT>    WebSocket port [default: 1978]
+--port <PORT>       HTTP API port [default: 8766]
+--timeout <SECS>    Response wait timeout [default: 30]
 ```
 
 ---
 
-## HTTP API
+## API overview
 
-All endpoints accept and return JSON. Endpoints that trigger ServiceNow queries block until
-the response arrives (up to `--timeout` seconds). Endpoints that write or run scripts return
-immediately with `{"status":"sent"}` — watch the [event stream](#event-stream-sse) for output.
+All endpoints accept and return JSON. Endpoints that call ServiceNow block until the response
+arrives (up to `--timeout` seconds), then return the result directly in the HTTP response.
 
-### `GET /health`
-
-Check whether a Helper Tab is connected.
+### Health
 
 ```bash
 curl http://127.0.0.1:8766/health
+# {"status":"ready","helper_tab_connected":true}
 ```
 
-```json
-{"status":"ready","helper_tab_connected":true}
-```
-
----
-
-### `POST /query`
-
-Query any ServiceNow table. Blocks until the response arrives.
+### Quick examples
 
 ```bash
-curl -X POST http://127.0.0.1:8766/query \
+# List open incidents
+curl 'http://127.0.0.1:8766/records/incident?instance=dev12345.service-now.com&q=active%3Dtrue&limit=5'
+
+# Run a Glide script and get the output synchronously
+curl -X POST http://127.0.0.1:8766/scripts/bg \
   -H 'Content-Type: application/json' \
-  -d '{
-    "instance": "dev12345",
-    "table": "sys_user",
-    "encoded_query": "active=true^last_name=Smith"
-  }'
-```
+  -d '{"instance":"dev12345.service-now.com","script":"gs.info(gs.getUserName())"}'
 
-`encoded_query` is a standard ServiceNow encoded query string (the `sysparm_query` parameter
-you see in URLs). The alias `"query"` is also accepted.
-
-Response is the raw `agentQueryRecordsResponse` message from the Helper Tab.
-
----
-
-### `POST /bg`
-
-Run a background script (Glide server-side JavaScript) on the instance.
-Returns immediately. Output comes back as an event — pipe the [event stream](#event-stream-sse)
-to see it.
-
-```bash
-curl -X POST http://127.0.0.1:8766/bg \
+# Proxy any ServiceNow REST call through the browser session
+curl -X POST http://127.0.0.1:8766/rest \
   -H 'Content-Type: application/json' \
-  -d '{
-    "instance": "dev12345",
-    "code": "gs.info(gs.getUserName())"
-  }'
-```
+  -d '{"instance":"dev12345.service-now.com","endpoint":"/api/now/table/sys_user","query_params":{"sysparm_limit":"3"}}'
 
----
-
-### `POST /update`
-
-Write a field value on an existing record.
-
-```bash
-curl -X POST http://127.0.0.1:8766/update \
+# Take a screenshot of the active SN tab
+curl -X POST http://127.0.0.1:8766/browser/screenshot \
   -H 'Content-Type: application/json' \
-  -d '{
-    "instance": "dev12345",
-    "table": "sys_script_include",
-    "sys_id": "abc123...",
-    "field": "script",
-    "content": "var MyUtil = Class.create();\nMyUtil.prototype = {};"
-  }'
-```
+  -d '{"instance":"dev12345.service-now.com","url":"incident_list.do"}'
 
----
-
-### `POST /slash`
-
-Run any SN Utils slash command. Useful for `/token`, `/tn`, `/bg`, etc.
-
-```bash
-curl -X POST http://127.0.0.1:8766/slash \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "instance": "dev12345",
-    "command": "/token"
-  }'
-```
-
----
-
-### `POST /screenshot`
-
-Capture a screenshot of a ServiceNow page. Blocks until the image is returned.
-Optionally navigate to a URL first.
-
-```bash
-curl -X POST http://127.0.0.1:8766/screenshot \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "instance": "dev12345",
-    "url": "/now/nav/ui/classic/params/target/sys_script_include_list.do"
-  }'
-```
-
-Response includes base64 image data from the Helper Tab.
-
----
-
-### `POST /switch`
-
-Switch update set, application scope, or domain on the connected instance.
-
-```bash
-curl -X POST http://127.0.0.1:8766/switch \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "instance": "dev12345",
-    "switch_type": "updateSet",
-    "value": "My Update Set"
-  }'
-```
-
-`switch_type`: `"updateSet"` | `"scope"` | `"domain"`
-
----
-
-### `POST /command`
-
-Raw JSON passthrough. Send any WebSocket action directly. For actions with a known synchronous
-response (`agentQueryRecords`, `takeScreenshot`, `createArtifact`), blocks and returns the
-response. Everything else is fire-and-forget.
-
-```bash
-curl -X POST http://127.0.0.1:8766/command \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "action": "agentQueryRecords",
-    "instance": "dev12345",
-    "table": "sys_atf_test",
-    "encodedQuery": "active=true"
-  }'
-```
-
----
-
-### `GET /events` — Event stream (SSE)
-
-Every message received from the Helper Tab is broadcast here as a Server-Sent Event.
-This is how you observe output from fire-and-forget operations (background scripts,
-field writes, slash commands).
-
-```bash
+# Stream all raw WebSocket events
 curl -N http://127.0.0.1:8766/events
 ```
 
-```
-data: {"action":"bannerMessage","message":"Script executed","class":"alert alert-success"}
-data: {"action":"agentQueryRecordsResponse","records":[...]}
-```
+---
 
-In another terminal, run a background script and watch the output arrive:
+## API reference
 
-```bash
-curl -X POST http://127.0.0.1:8766/bg \
-  -H 'Content-Type: application/json' \
-  -d '{"instance":"dev12345","code":"gs.info(new GlideRecord(\"sys_user\").getRowCount())"}'
-```
+| Area | Doc |
+|------|-----|
+| Record CRUD (`GET/POST/PATCH/DELETE /records/:table`) | [docs/records.md](docs/records.md) |
+| Background scripts & slash commands (`/scripts/*`) | [docs/scripts.md](docs/scripts.md) |
+| Browser-authenticated REST passthrough (`/rest`) | [docs/rest.md](docs/rest.md) |
+| Browser automation — forms, navigation, screenshots (`/browser/*`) | [docs/browser.md](docs/browser.md) |
+| Context switching — update set, scope, domain (`/context`) | [docs/context.md](docs/context.md) |
+| Artifact creation & table metadata (`/artifacts`) | [docs/artifacts.md](docs/artifacts.md) |
+| Raw WebSocket passthrough & protocol internals (`/raw`, `/events`) | [docs/protocol.md](docs/protocol.md) |
 
 ---
 
 ## Known limitations
 
-**Concurrent requests of the same type**: requests are correlated to responses by action type
-using a FIFO queue. Two simultaneous `/query` calls against the same instance will get their
-responses matched in order. Interleaving queries to different tables from concurrent callers
-could theoretically mismatch — in practice this isn't an issue for sequential tooling.
-
 **Port conflict**: snproxy and VS Code's sn-scriptsync both want `:1978`. Run one or the other.
 
-**One Helper Tab**: the last Helper Tab to connect wins. Multiple tabs work, but only the most
-recent connection receives outbound commands.
+**One active Helper Tab**: the last Helper Tab to connect wins. Multiple tabs work, but only
+the most recent connection receives outbound commands.
 
----
-
-## WS protocol reference
-
-Outbound actions snproxy can send to the Helper Tab:
-
-| Action | Description |
-|--------|-------------|
-| `runSlashCommand` | Execute an SN Utils slash command (`/bg`, `/token`, `/tn`, …) |
-| `agentQueryRecords` | Run an encoded query against any table |
-| `saveFieldAsFile` | Write a field value to an existing record |
-| `takeScreenshot` | Capture a page (navigates if `url` given) |
-| `uploadAttachment` | Attach a file (disk or base64) to a record |
-| `switchContext` | Switch update set, scope, or domain |
-| `createArtifact` | Create a new record from a fields payload |
-
-Inbound actions the Helper Tab sends back:
-
-| Action | Description |
-|--------|-------------|
-| `agentQueryRecordsResponse` | Query results |
-| `screenshotResponse` | Screenshot data |
-| `createRecordResponse` | Artifact creation result |
-| `saveFieldAsFile` | Script content synced FROM ServiceNow |
-| `saveWidget` | Widget files synced from ServiceNow |
-
-All events appear on the SSE stream regardless of whether an HTTP call is waiting for them.
+**`agentRestApi` requires SN Utils Pro** for the browser passthrough endpoints (`/rest`,
+and `GET`/`PATCH`/`DELETE /records`). Record listing via `agentQueryRecords` works on the
+free tier.
