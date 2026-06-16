@@ -1,3 +1,7 @@
+[workspace]
+members = ["sncli"]
+resolver = "2"
+
 [package]
 name = "snproxy"
 version = "0.1.0"

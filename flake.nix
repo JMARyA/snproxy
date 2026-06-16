@@ -1,5 +1,5 @@
 {
-  description = "snproxy — ServiceNow REST API proxy via SN Utils WebSocket";
+  description = "snproxy + sncli — ServiceNow proxy and CLI via SN Utils WebSocket";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -50,11 +50,13 @@
         let
           cfg = config.services.snproxy;
           # Resolve the package for the system this module is evaluated on.
+          # buildRustPackage builds the entire workspace, so this derivation
+          # contains both snproxy (daemon) and sncli (CLI client).
           package = self.packages.${pkgs.system}.default;
         in
         {
           options.services.snproxy = {
-            enable = lib.mkEnableOption "snproxy ServiceNow WebSocket proxy";
+            enable = lib.mkEnableOption "snproxy ServiceNow WebSocket proxy (also installs sncli into PATH)";
 
             host = lib.mkOption {
               type    = lib.types.str;
@@ -94,6 +96,10 @@
           };
 
           config = lib.mkIf cfg.enable {
+            # Expose both snproxy and sncli in the system PATH so any user or
+            # script on the host can talk to the running proxy without extra setup.
+            environment.systemPackages = [ package ];
+
             systemd.services.snproxy = {
               description = "snproxy — ServiceNow REST proxy via SN Utils WebSocket";
               wantedBy    = [ "multi-user.target" ];
