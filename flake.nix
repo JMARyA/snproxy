@@ -10,14 +10,27 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-      in
-      {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
+
+        snproxy = pkgs.rustPlatform.buildRustPackage {
           pname = "snproxy";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "snproxy" ];
         };
+
+        sncli = pkgs.rustPlatform.buildRustPackage {
+          pname = "sncli";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "sncli" ];
+        };
+      in
+      {
+        packages.snproxy = snproxy;
+        packages.sncli   = sncli;
+        packages.default = snproxy;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -49,10 +62,8 @@
       nixosModules.default = { config, lib, pkgs, ... }:
         let
           cfg = config.services.snproxy;
-          # Resolve the package for the system this module is evaluated on.
-          # buildRustPackage builds the entire workspace, so this derivation
-          # contains both snproxy (daemon) and sncli (CLI client).
-          package = self.packages.${pkgs.system}.default;
+          snproxy = self.packages.${pkgs.system}.snproxy;
+          sncli   = self.packages.${pkgs.system}.sncli;
         in
         {
           options.services.snproxy = {
@@ -96,9 +107,7 @@
           };
 
           config = lib.mkIf cfg.enable {
-            # Expose both snproxy and sncli in the system PATH so any user or
-            # script on the host can talk to the running proxy without extra setup.
-            environment.systemPackages = [ package ];
+            environment.systemPackages = [ snproxy sncli ];
 
             systemd.services.snproxy = {
               description = "snproxy — ServiceNow REST proxy via SN Utils WebSocket";
@@ -107,7 +116,7 @@
 
               serviceConfig = {
                 ExecStart = lib.escapeShellArgs [
-                  "${package}/bin/snproxy"
+                  "${snproxy}/bin/snproxy"
                   "--host"     cfg.host
                   "--ws-port"  (toString cfg.wsPort)
                   "--port"     (toString cfg.port)
