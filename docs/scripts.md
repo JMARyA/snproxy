@@ -21,10 +21,50 @@ Uses `agentRunBackgroundScript` — a fully correlated call that **blocks** unti
 ```
 
 **Response**
+
+The raw ServiceNow HTML response is automatically parsed: the `*** Script:` prefix, `<BR/>` tags,
+and HTML entities (`&quot;`, `&lt;`, etc.) are stripped, and only the clean output lines are
+returned. An additional `lines` array provides each line individually.
+
 ```json
 {
   "executed": true,
-  "output": "*** Script: Hello from snproxy\n*** Script: 1\n"
+  "output": "Hello from snproxy\n1",
+  "lines": [
+    "Hello from snproxy",
+    "1"
+  ]
+}
+```
+
+**Broader examples**
+
+Query records and build a report:
+```bash
+curl -X POST http://127.0.0.1:8766/scripts/bg \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instance": "dev12345.service-now.com",
+    "script": "var gr = new GlideRecord(\"incident\"); gr.setLimit(5); gr.addActiveQuery(); gr.query(); gs.info(\"Active: \" + gr.getRowCount()); while (gr.next()) { gs.print(gr.number + \" | \" + gr.short_description); }"
+  }'
+```
+
+Export structured data as JSON:
+```bash
+curl -X POST http://127.0.0.1:8766/scripts/bg \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instance": "dev12345.service-now.com",
+    "script": "var items = []; var gr = new GlideRecord(\"incident\"); gr.setLimit(3); gr.query(); while (gr.next()) { items.push({number: gr.getDisplayValue(\"number\"), state: gr.getDisplayValue(\"state\") }); } gs.info(JSON.stringify(items));"
+  }'
+```
+
+Error output is preserved with stack traces:
+```json
+{
+  "executed": true,
+  "output": "before\nScript execution error: \"undefinedVar\" is not defined.\n   script : Line(3) ...",
+  "lines": ["before", "Script execution error: \"undefinedVar\" is not defined.", ...]
 }
 ```
 

@@ -162,6 +162,9 @@ struct ScriptsBgArgs {
     /// Read script from a .js file
     #[arg(long, conflicts_with = "script")]
     file: Option<PathBuf>,
+    /// Print structured JSON with lines array
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -636,8 +639,8 @@ async fn run(cli: Cli) -> Result<()> {
                 };
                 let body = json!({ "instance": normalize_instance(&a.instance), "script": script });
                 let res = post!(format!("{server}/scripts/bg"), body);
-                if raw {
-                    print_json(&res, true);
+                if raw || a.json {
+                    print_json(&res, raw);
                 } else if let Some(out) = res.get("output").and_then(|o| o.as_str()) {
                     print!("{out}");
                 } else {

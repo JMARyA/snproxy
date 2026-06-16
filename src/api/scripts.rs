@@ -41,9 +41,38 @@ pub async fn bg(
         return Err(AppError::Remote(msg));
     }
 
+    let raw = resp.get("output").and_then(|o| o.as_str()).unwrap_or("");
+
+    // Extract content from <PRE> block, split on <BR/>, strip prefixes
+    let lines: Vec<String> = raw
+        .split("<PRE>")
+        .nth(1)
+        .unwrap_or("")
+        .split("</PRE>")
+        .next()
+        .unwrap_or("")
+        .split("<BR/>")
+        .flat_map(|s| s.split("<br/>"))
+        .map(|line| {
+            let s = line
+                .strip_prefix("*** Script: ")
+                .unwrap_or(line)
+                .trim();
+            s.replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let output = lines.join("\n");
+
     Ok(Json(json!({
         "executed": true,
-        "output": resp.get("output").and_then(|o| o.as_str()).unwrap_or(""),
+        "output": output,
+        "lines": lines,
     })))
 }
 

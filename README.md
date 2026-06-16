@@ -153,6 +153,25 @@ curl -X POST http://127.0.0.1:8766/browser/screenshot \
 curl -N http://127.0.0.1:8766/events
 ```
 
+### sncli
+
+The repo ships with `sncli`, a handy CLI client:
+
+```bash
+# Background scripts — clean parsed output
+sncli scripts bg -i dev12345 -s 'gs.info("hello"); gs.print("world")'
+
+# Structured JSON with lines array
+sncli scripts bg --json -i dev12345 -s 'gs.info("hello")'
+
+# Read script from file
+sncli scripts bg -i dev12345 -f myscript.js
+
+# Query records
+sncli records list incident -l 5 -i dev12345
+sncli records get -i dev12345 incident some_sys_id
+```
+
 ---
 
 ## API reference
