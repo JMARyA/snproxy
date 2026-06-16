@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use reqwest::Client;
+use reqwest::{Client, Method};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
@@ -18,6 +18,9 @@ struct Cli {
     /// Print compact JSON instead of pretty-printed
     #[arg(long, short = 'r')]
     raw: bool,
+    /// Log every request and raw response to stderr
+    #[arg(long, short = 'v')]
+    verbose: bool,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -418,74 +421,68 @@ fn coerce_value(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
 }
 
-async fn api_get(client: &Client, url: String) -> Result<Value> {
-    let resp = client.get(&url).send().await.with_context(|| format!("GET {url}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("parsing response JSON")?;
-    if !status.is_success() {
-        bail!("HTTP {status}: {}", body);
+/// Single HTTP helper — reads body as text first so non-JSON error
+/// responses (e.g. axum's plain-text query-param rejections) are
+/// always surfaced clearly rather than producing a cryptic EOF.
+async fn api(
+    client: &Client,
+    method: Method,
+    url: &str,
+    body: Option<&Value>,
+    verbose: bool,
+) -> Result<Value> {
+    if verbose {
+        eprintln!("[sncli] → {} {}", method, url);
+        if let Some(b) = body {
+            eprintln!("[sncli]   body: {}", serde_json::to_string(b).unwrap_or_default());
+        }
     }
-    Ok(body)
-}
 
-async fn api_post(client: &Client, url: String, payload: &Value) -> Result<Value> {
-    let resp = client
-        .post(&url)
-        .json(payload)
+    let mut req = client.request(method.clone(), url);
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+
+    let resp = req
         .send()
         .await
-        .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("parsing response JSON")?;
-    if !status.is_success() {
-        bail!("HTTP {status}: {}", body);
-    }
-    Ok(body)
-}
+        .with_context(|| format!("{} {}", method, url))?;
 
-async fn api_patch(client: &Client, url: String, payload: &Value) -> Result<Value> {
-    let resp = client
-        .patch(&url)
-        .json(payload)
-        .send()
-        .await
-        .with_context(|| format!("PATCH {url}"))?;
     let status = resp.status();
-    let body: Value = resp.json().await.context("parsing response JSON")?;
-    if !status.is_success() {
-        bail!("HTTP {status}: {}", body);
-    }
-    Ok(body)
-}
+    let text = resp
+        .text()
+        .await
+        .with_context(|| format!("{} {} — reading response body", method, url))?;
 
-async fn api_put(client: &Client, url: String, payload: &Value) -> Result<Value> {
-    let resp = client
-        .put(&url)
-        .json(payload)
-        .send()
-        .await
-        .with_context(|| format!("PUT {url}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("parsing response JSON")?;
-    if !status.is_success() {
-        bail!("HTTP {status}: {}", body);
+    if verbose {
+        eprintln!(
+            "[sncli] ← {} {}  body: {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or(""),
+            if text.is_empty() { "(empty)" } else { &text }
+        );
     }
-    Ok(body)
-}
 
-async fn api_delete(client: &Client, url: String, payload: &Value) -> Result<Value> {
-    let resp = client
-        .delete(&url)
-        .json(payload)
-        .send()
-        .await
-        .with_context(|| format!("DELETE {url}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("parsing response JSON")?;
-    if !status.is_success() {
-        bail!("HTTP {status}: {}", body);
+    if text.is_empty() {
+        bail!("{} {} → HTTP {} with empty body", method, url, status);
     }
-    Ok(body)
+
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => {
+            if !status.is_success() {
+                let msg = value
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or(&text);
+                bail!("{} {} → HTTP {}: {}", method, url, status, msg);
+            }
+            Ok(value)
+        }
+        Err(_) => {
+            // Server sent non-JSON (e.g. axum rejected a bad query string)
+            bail!("{} {} → HTTP {} (non-JSON): {}", method, url, status, text);
+        }
+    }
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -503,19 +500,46 @@ async fn run(cli: Cli) -> Result<()> {
     let client = Client::new();
     let server = cli.server.trim_end_matches('/').to_string();
     let raw = cli.raw;
+    let v = cli.verbose;
+
+    macro_rules! get {
+        ($url:expr) => {
+            api(&client, Method::GET, &$url, None, v).await?
+        };
+    }
+    macro_rules! post {
+        ($url:expr, $body:expr) => {
+            api(&client, Method::POST, &$url, Some(&$body), v).await?
+        };
+    }
+    macro_rules! patch {
+        ($url:expr, $body:expr) => {
+            api(&client, Method::PATCH, &$url, Some(&$body), v).await?
+        };
+    }
+    macro_rules! put {
+        ($url:expr, $body:expr) => {
+            api(&client, Method::PUT, &$url, Some(&$body), v).await?
+        };
+    }
+    macro_rules! delete {
+        ($url:expr) => {
+            api(&client, Method::DELETE, &$url, None, v).await?
+        };
+    }
 
     match cli.command {
         Cmd::Health => {
-            let v = api_get(&client, format!("{server}/health")).await?;
-            print_json(&v, raw);
+            let res = get!(format!("{server}/health"));
+            print_json(&res, raw);
         }
 
         Cmd::Records(a) => match a.action {
             RecordsCmd::List(a) => {
                 let mut url = format!(
                     "{server}/records/{table}?instance={inst}&limit={limit}",
-                    table = a.table,
-                    inst = a.instance,
+                    table = urlenc(&a.table),
+                    inst = urlenc(&a.instance),
                     limit = a.limit,
                 );
                 if let Some(q) = &a.query {
@@ -527,62 +551,61 @@ async fn run(cli: Cli) -> Result<()> {
                 if let Some(ob) = &a.order_by {
                     url.push_str(&format!("&order_by={}", urlenc(ob)));
                 }
-                let v = api_get(&client, url).await?;
-                print_json(&v, raw);
+                let res = get!(url);
+                print_json(&res, raw);
             }
 
             RecordsCmd::Get(a) => {
                 let mut url = format!(
                     "{server}/records/{table}/{sys_id}?instance={inst}",
-                    table = a.table,
-                    sys_id = a.sys_id,
-                    inst = a.instance,
+                    table = urlenc(&a.table),
+                    sys_id = urlenc(&a.sys_id),
+                    inst = urlenc(&a.instance),
                 );
                 if let Some(f) = &a.fields {
                     url.push_str(&format!("&fields={}", urlenc(f)));
                 }
-                let v = api_get(&client, url).await?;
-                print_json(&v, raw);
+                let res = get!(url);
+                print_json(&res, raw);
             }
 
             RecordsCmd::Schema(a) => {
                 let url = format!(
                     "{server}/records/{table}/schema?instance={inst}",
-                    table = a.table,
-                    inst = a.instance,
+                    table = urlenc(&a.table),
+                    inst = urlenc(&a.instance),
                 );
-                let v = api_get(&client, url).await?;
-                print_json(&v, raw);
+                let res = get!(url);
+                print_json(&res, raw);
             }
 
             RecordsCmd::Create(a) => {
                 let fields = parse_fields(&a.fields)?;
-                let payload = json!({ "instance": a.instance, "fields": fields });
-                let v = api_post(&client, format!("{server}/records/{}", a.table), &payload).await?;
-                print_json(&v, raw);
+                let body = json!({ "instance": a.instance, "fields": fields });
+                let res = post!(format!("{server}/records/{}", urlenc(&a.table)), body);
+                print_json(&res, raw);
             }
 
             RecordsCmd::Update(a) => {
                 let fields = parse_fields(&a.fields)?;
-                let payload = json!({ "instance": a.instance, "fields": fields });
-                let v = api_patch(
-                    &client,
-                    format!("{server}/records/{}/{}", a.table, a.sys_id),
-                    &payload,
-                )
-                .await?;
-                print_json(&v, raw);
+                let body = json!({ "instance": a.instance, "fields": fields });
+                let res = patch!(
+                    format!("{server}/records/{}/{}", urlenc(&a.table), urlenc(&a.sys_id)),
+                    body
+                );
+                print_json(&res, raw);
             }
 
+            // DELETE uses a query param, not a body — the server handler uses Query<DeleteParams>
             RecordsCmd::Delete(a) => {
-                let payload = json!({ "instance": a.instance });
-                let v = api_delete(
-                    &client,
-                    format!("{server}/records/{}/{}", a.table, a.sys_id),
-                    &payload,
-                )
-                .await?;
-                print_json(&v, raw);
+                let url = format!(
+                    "{server}/records/{table}/{sys_id}?instance={inst}",
+                    table = urlenc(&a.table),
+                    sys_id = urlenc(&a.sys_id),
+                    inst = urlenc(&a.instance),
+                );
+                let res = delete!(url);
+                print_json(&res, raw);
             }
         },
 
@@ -590,62 +613,59 @@ async fn run(cli: Cli) -> Result<()> {
             ScriptsCmd::Bg(a) => {
                 let script = match (&a.script, &a.file) {
                     (Some(s), _) => s.clone(),
-                    (_, Some(path)) => {
-                        std::fs::read_to_string(path)
-                            .with_context(|| format!("reading {}", path.display()))?
-                    }
+                    (_, Some(path)) => std::fs::read_to_string(path)
+                        .with_context(|| format!("reading {}", path.display()))?,
                     (None, None) => bail!("provide --script or --file"),
                 };
-                let payload = json!({ "instance": a.instance, "script": script });
-                let v = api_post(&client, format!("{server}/scripts/bg"), &payload).await?;
-                // Print script output on stdout for easy piping, full JSON when --raw
+                let body = json!({ "instance": a.instance, "script": script });
+                let res = post!(format!("{server}/scripts/bg"), body);
                 if raw {
-                    print_json(&v, true);
-                } else if let Some(out) = v.get("output").and_then(|o| o.as_str()) {
+                    print_json(&res, true);
+                } else if let Some(out) = res.get("output").and_then(|o| o.as_str()) {
                     print!("{out}");
                 } else {
-                    print_json(&v, false);
+                    print_json(&res, false);
                 }
             }
 
             ScriptsCmd::Slash(a) => {
-                let mut payload = json!({
+                let mut body = json!({
                     "instance": a.instance,
                     "command":  a.command,
                     "auto_run": !a.no_auto_run,
                 });
                 if let Some(url) = a.url {
-                    payload["url"] = json!(url);
+                    body["url"] = json!(url);
                 }
                 if let Some(tab_id) = a.tab_id {
-                    payload["tab_id"] = json!(tab_id);
+                    body["tab_id"] = json!(tab_id);
                 }
-                let v = api_post(&client, format!("{server}/scripts/slash"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/scripts/slash"), body);
+                print_json(&res, raw);
             }
         },
 
         Cmd::Rest(a) => {
-            let mut payload = json!({
+            let mut body = json!({
                 "instance": a.instance,
                 "method":   a.method.to_uppercase(),
                 "endpoint": a.endpoint,
             });
             if let Some(b) = a.body {
-                payload["body"] = parse_json(&b, "--body")?;
+                body["body"] = parse_json(&b, "--body")?;
             }
             if let Some(p) = a.params {
-                payload["query_params"] = parse_json(&p, "--params")?;
+                body["query_params"] = parse_json(&p, "--params")?;
             }
-            let v = api_post(&client, format!("{server}/rest"), &payload).await?;
-            print_json(&v, raw);
+            let res = post!(format!("{server}/rest"), body);
+            print_json(&res, raw);
         }
 
         Cmd::Browser(a) => match a.action {
             BrowserCmd::Form(a) => {
                 let mut url = format!(
                     "{server}/browser/form?instance={inst}",
-                    inst = a.instance,
+                    inst = urlenc(&a.instance),
                 );
                 if let Some(u) = &a.url {
                     url.push_str(&format!("&url={}", urlenc(u)));
@@ -656,48 +676,47 @@ async fn run(cli: Cli) -> Result<()> {
                 if let Some(f) = &a.fields {
                     url.push_str(&format!("&fields={}", urlenc(f)));
                 }
-                let v = api_get(&client, url).await?;
-                print_json(&v, raw);
+                let res = get!(url);
+                print_json(&res, raw);
             }
 
             BrowserCmd::SetField(a) => {
-                let mut payload = json!({
+                let mut body = json!({
                     "instance": a.instance,
                     "field":    a.field,
                     "value":    coerce_value(&a.value),
                 });
                 if let Some(dv) = a.display_value {
-                    payload["display_value"] = json!(dv);
+                    body["display_value"] = json!(dv);
                 }
                 if let Some(url) = a.url {
-                    payload["url"] = json!(url);
+                    body["url"] = json!(url);
                 }
                 if let Some(tab_id) = a.tab_id {
-                    payload["tab_id"] = json!(tab_id);
+                    body["tab_id"] = json!(tab_id);
                 }
-                let v = api_post(&client, format!("{server}/browser/form"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/browser/form"), body);
+                print_json(&res, raw);
             }
 
             BrowserCmd::Action(a) => {
-                let mut payload = json!({
+                let mut body = json!({
                     "instance":         a.instance,
                     "ui_action":        a.action,
                     "suppress_dialogs": !a.allow_dialogs,
                 });
                 if let Some(url) = a.url {
-                    payload["url"] = json!(url);
+                    body["url"] = json!(url);
                 }
                 if let Some(tab_id) = a.tab_id {
-                    payload["tab_id"] = json!(tab_id);
+                    body["tab_id"] = json!(tab_id);
                 }
-                let v =
-                    api_post(&client, format!("{server}/browser/form/action"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/browser/form/action"), body);
+                print_json(&res, raw);
             }
 
             BrowserCmd::Navigate(a) => {
-                let mut payload = json!({
+                let mut body = json!({
                     "instance":         a.instance,
                     "url":              a.url,
                     "new_tab":          a.new_tab,
@@ -705,71 +724,69 @@ async fn run(cli: Cli) -> Result<()> {
                     "discard_unsaved":  a.discard_unsaved,
                 });
                 if let Some(tab_id) = a.tab_id {
-                    payload["tab_id"] = json!(tab_id);
+                    body["tab_id"] = json!(tab_id);
                 }
-                let v =
-                    api_post(&client, format!("{server}/browser/navigate"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/browser/navigate"), body);
+                print_json(&res, raw);
             }
 
             BrowserCmd::Click(a) => {
-                let mut payload = json!({
+                let mut body = json!({
                     "instance":         a.instance,
                     "selector":         a.selector,
                     "suppress_dialogs": !a.allow_dialogs,
                 });
                 if let Some(url) = a.url {
-                    payload["url"] = json!(url);
+                    body["url"] = json!(url);
                 }
                 if let Some(tab_id) = a.tab_id {
-                    payload["tab_id"] = json!(tab_id);
+                    body["tab_id"] = json!(tab_id);
                 }
-                let v = api_post(&client, format!("{server}/browser/click"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/browser/click"), body);
+                print_json(&res, raw);
             }
 
             BrowserCmd::Screenshot(a) => {
                 if a.url.is_none() && a.tab_id.is_none() {
                     bail!("--url or --tab-id is required");
                 }
-                let mut payload = json!({
+                let mut body = json!({
                     "instance":   a.instance,
                     "exact_url":  a.exact_url,
                     "file_name":  a.output,
                 });
                 if let Some(url) = a.url {
-                    payload["url"] = json!(url);
+                    body["url"] = json!(url);
                 }
                 if let Some(tab_id) = a.tab_id {
-                    payload["tab_id"] = json!(tab_id);
+                    body["tab_id"] = json!(tab_id);
                 }
-                let v =
-                    api_post(&client, format!("{server}/browser/screenshot"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/browser/screenshot"), body);
+                print_json(&res, raw);
             }
 
             BrowserCmd::Tab(a) => {
-                let payload = json!({
+                let body = json!({
                     "instance":          a.instance,
                     "url":               a.url,
                     "reload":            a.reload,
                     "wait_for_load":     a.wait,
                     "open_if_not_found": !a.no_open,
                 });
-                let v = api_post(&client, format!("{server}/browser/tab"), &payload).await?;
-                print_json(&v, raw);
+                let res = post!(format!("{server}/browser/tab"), body);
+                print_json(&res, raw);
             }
         },
 
         Cmd::Context(a) => {
-            let payload = json!({
+            let body = json!({
                 "instance":   a.instance,
                 "type":       a.r#type,
                 "value":      a.value,
                 "reload_tab": !a.no_reload,
             });
-            let v = api_put(&client, format!("{server}/context"), &payload).await?;
-            print_json(&v, raw);
+            let res = put!(format!("{server}/context"), body);
+            print_json(&res, raw);
         }
 
         Cmd::Artifact(a) => {
@@ -778,14 +795,14 @@ async fn run(cli: Cli) -> Result<()> {
                 None => Map::new(),
             };
             fields.insert("name".to_string(), json!(a.name));
-            let payload = json!({
+            let body = json!({
                 "instance": a.instance,
                 "table":    a.table,
                 "scope":    a.scope,
                 "fields":   fields,
             });
-            let v = api_post(&client, format!("{server}/artifacts"), &payload).await?;
-            print_json(&v, raw);
+            let res = post!(format!("{server}/artifacts"), body);
+            print_json(&res, raw);
         }
 
         Cmd::Events => {
@@ -799,8 +816,8 @@ async fn run(cli: Cli) -> Result<()> {
             if a.fire_and_forget {
                 payload["fire_and_forget"] = json!(true);
             }
-            let v = api_post(&client, format!("{server}/raw"), &payload).await?;
-            print_json(&v, raw);
+            let res = post!(format!("{server}/raw"), payload);
+            print_json(&res, raw);
         }
     }
 
