@@ -159,12 +159,12 @@ curl -N http://127.0.0.1:8766/events
 
 | Area | Doc |
 |------|-----|
-| Record CRUD (`GET/POST/PATCH/DELETE /records/:table`) | [docs/records.md](docs/records.md) |
+| Record CRUD + schema (`GET/POST/PATCH/DELETE /records/:table`, `GET /records/:table/schema`) | [docs/records.md](docs/records.md) |
 | Background scripts & slash commands (`/scripts/*`) | [docs/scripts.md](docs/scripts.md) |
 | Browser-authenticated REST passthrough (`/rest`) | [docs/rest.md](docs/rest.md) |
 | Browser automation — forms, navigation, screenshots (`/browser/*`) | [docs/browser.md](docs/browser.md) |
 | Context switching — update set, scope, domain (`/context`) | [docs/context.md](docs/context.md) |
-| Artifact creation & table metadata (`/artifacts`) | [docs/artifacts.md](docs/artifacts.md) |
+| Development artifact creation (`/artifacts`) | [docs/artifacts.md](docs/artifacts.md) |
 | Raw WebSocket passthrough & protocol internals (`/raw`, `/events`) | [docs/protocol.md](docs/protocol.md) |
 
 ---

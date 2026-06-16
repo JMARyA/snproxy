@@ -168,7 +168,7 @@ pub struct NavigateReq {
     pub new_tab: bool,
     #[serde(default = "default_true")]
     pub wait_for_load: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub discard_unsaved: bool,
 }
 

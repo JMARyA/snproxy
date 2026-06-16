@@ -1,12 +1,19 @@
 # Artifacts API
 
-Create ServiceNow records through the Helper Tab and inspect table schemas.
+Create ServiceNow development artifacts through the Helper Tab.
 
-The `/artifacts` endpoint is a convenience wrapper around `createRecord`.  For general-purpose record creation use [`POST /records/:table`](records.md#create-a-record).  The key difference here is that `createRecord` opens the record in the browser after creation, which can be useful for development workflows.
+`POST /artifacts` uses the `createRecord` WS action, which is specifically designed for
+development artifacts (Script Includes, Business Rules, UI Scripts, etc.).  It adds the new
+record to the active update set and opens it in the browser editor.
+
+For general-purpose record creation (incidents, tasks, users, custom tables) use
+[`POST /records/:table`](records.md#create-a-record) instead, which goes through `agentRestApi`
+and works on any table.  For table schema inspection use
+[`GET /records/:table/schema`](records.md#inspect-table-schema).
 
 ---
 
-## Create an artifact (record)
+## Create an artifact
 
 ```
 POST /artifacts
@@ -46,42 +53,13 @@ Content-Type: application/json
 }
 ```
 
----
+### Common artifact tables
 
-## Get table field metadata
-
-Inspect the schema of any table — useful for discovering field names and types before creating or updating records.
-
-```
-GET /artifacts/metadata?instance=dev12345.service-now.com&table=sys_script_include
-```
-
-| param      | required | description         |
-|------------|----------|---------------------|
-| `instance` | yes      | ServiceNow hostname |
-| `table`    | yes      | Table name to inspect |
-
-**Response**
-```json
-{
-  "table": "sys_script_include",
-  "fields": [
-    { "name": "name",    "type": "string",  "label": "Name",    "mandatory": true  },
-    { "name": "script",  "type": "script",  "label": "Script",  "mandatory": false },
-    { "name": "active",  "type": "boolean", "label": "Active",  "mandatory": false }
-  ]
-}
-```
-
-### Common tables for script development
-
-| Table                    | Description                        |
-|--------------------------|------------------------------------|
-| `sys_script_include`     | Script Includes                    |
-| `sys_ui_script`          | UI Scripts                         |
-| `sys_script`             | Business Rules                     |
-| `sys_ui_action`          | UI Actions                         |
-| `sys_ws_operation`       | Scripted REST Operations           |
-| `sys_flow_context`       | Flow Designer contexts             |
-| `sys_atf_test`           | ATF Test definitions               |
-| `sys_update_set`         | Update Sets                        |
+| Table                | Description               |
+|----------------------|---------------------------|
+| `sys_script_include` | Script Includes           |
+| `sys_ui_script`      | UI Scripts                |
+| `sys_script`         | Business Rules            |
+| `sys_ui_action`      | UI Actions                |
+| `sys_ws_operation`   | Scripted REST Operations  |
+| `sys_atf_test`       | ATF Test definitions      |

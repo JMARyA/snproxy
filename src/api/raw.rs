@@ -5,15 +5,16 @@ use serde_json::{json, Value};
 use crate::state::{AppError, AppState};
 
 // ---------------------------------------------------------------------------
-// POST /raw  — send any WebSocket message to the browser, get the response
+// POST /raw  — send any WebSocket message to the browser
 // ---------------------------------------------------------------------------
 
-/// Pass the exact JSON payload.  If it contains an `agentRequestId` field snproxy
-/// uses it as-is; otherwise a fresh ID is injected so the response is correlated.
-///
-/// Use this when none of the higher-level endpoints cover what you need.
 #[derive(Deserialize)]
 pub struct RawReq {
+    /// When true, send the message and return immediately without waiting for
+    /// a response.  Use this for actions that don't send a correlated reply
+    /// (e.g. bannerMessage, runSlashCommand).  Defaults to false.
+    #[serde(default)]
+    pub fire_and_forget: bool,
     #[serde(flatten)]
     pub payload: Value,
 }
@@ -22,14 +23,17 @@ pub async fn handler(
     State(s): State<AppState>,
     Json(r): Json<RawReq>,
 ) -> Result<Json<Value>, AppError> {
-    let payload = r.payload;
-
-    if payload.get("action").and_then(|v| v.as_str()).is_none() {
-        return Err(AppError::BadRequest("payload must contain an 'action' field".into()));
+    if r.payload.get("action").and_then(|v| v.as_str()).is_none() {
+        return Err(AppError::BadRequest(
+            "payload must contain an 'action' field".into(),
+        ));
     }
 
-    // If the caller already embedded agentRequestId, honour it; otherwise
-    // call() injects one automatically.
-    let resp = s.call(payload).await?;
+    if r.fire_and_forget {
+        s.fire(r.payload).await?;
+        return Ok(Json(json!({ "sent": true })));
+    }
+
+    let resp = s.call(r.payload).await?;
     Ok(Json(json!({ "response": resp })))
 }

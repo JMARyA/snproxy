@@ -52,23 +52,24 @@ POST /records/:table
 Content-Type: application/json
 ```
 
+Works for any table — incidents, tasks, users, custom tables, etc. Uses `agentRestApi POST`.
+For creating development artifacts (Script Includes, Business Rules, etc.) that should be added
+to an update set and opened in the browser, use [`POST /artifacts`](artifacts.md) instead.
+
 ```json
 {
   "instance": "dev12345.service-now.com",
-  "scope": "global",
   "fields": {
-    "name": "My script include",
-    "script": "var MyClass = Class.create(); ...",
-    "active": "true"
+    "short_description": "Printer on fire",
+    "category": "hardware",
+    "urgency": "1"
   }
 }
 ```
 
-`scope` defaults to `"global"`.  `fields.name` is required.
-
 **Response**
 ```json
-{ "sys_id": "abc123", "name": "My script include", "table": "sys_script_include", "scope": "global" }
+{ "sys_id": "abc123", "table": "incident", "record": { ... } }
 ```
 
 ---
@@ -103,4 +104,25 @@ DELETE /records/:table/:sys_id?instance=dev12345.service-now.com
 **Response**
 ```json
 { "table": "sys_script_include", "sys_id": "abc123", "deleted": true }
+```
+
+---
+
+## Inspect table schema
+
+```
+GET /records/:table/schema?instance=dev12345.service-now.com
+```
+
+Returns field metadata for any table — useful before creating or updating records.
+
+**Response**
+```json
+{
+  "table": "incident",
+  "fields": [
+    { "name": "short_description", "type": "string",  "label": "Short description", "mandatory": true  },
+    { "name": "state",             "type": "integer", "label": "State",             "mandatory": false }
+  ]
+}
 ```

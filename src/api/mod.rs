@@ -19,9 +19,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         // health
         .route("/health", get(health::handler))
-        // CRUD records
+        // CRUD records + schema inspection
         .route("/records/{table}", get(records::list))
         .route("/records/{table}", post(records::create))
+        .route("/records/{table}/schema", get(records::schema))
         .route("/records/{table}/{sys_id}", get(records::get))
         .route("/records/{table}/{sys_id}", patch(records::update))
         .route("/records/{table}/{sys_id}", delete(records::delete))
@@ -40,9 +41,8 @@ pub fn router(state: AppState) -> Router {
         .route("/browser/tab", post(browser::tab))
         // context switching
         .route("/context", put(context::switch))
-        // artifact creation + table schema
+        // development artifact creation (opens in browser, adds to update set)
         .route("/artifacts", post(artifacts::create))
-        .route("/artifacts/metadata", get(artifacts::metadata))
         // SSE event stream
         .route("/events", get(events::stream))
         // raw WS passthrough

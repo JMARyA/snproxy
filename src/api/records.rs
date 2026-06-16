@@ -117,19 +117,13 @@ pub async fn get(
 }
 
 // ---------------------------------------------------------------------------
-// POST /records/:table  — create via the browser-side createRecord action
+// POST /records/:table  — create via agentRestApi (works for any table)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct CreateBody {
     pub instance: String,
-    #[serde(default = "default_scope")]
-    pub scope: String,
     pub fields: Map<String, Value>,
-}
-
-fn default_scope() -> String {
-    "global".to_string()
 }
 
 pub async fn create(
@@ -137,31 +131,28 @@ pub async fn create(
     Path(table): Path<String>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Value>, AppError> {
-    if !body.fields.contains_key("name") {
-        return Err(AppError::BadRequest("fields.name is required".into()));
+    if body.fields.is_empty() {
+        return Err(AppError::BadRequest("fields cannot be empty".into()));
     }
 
     let resp = s
         .call(json!({
-            "action": "createRecord",
+            "action":   "agentRestApi",
             "instance": body.instance,
-            "tableName": table,
-            "scope": body.scope,
-            "payload": body.fields,
+            "method":   "POST",
+            "endpoint": format!("/api/now/table/{table}"),
+            "body":     body.fields,
+            "appName":  "snproxy",
         }))
         .await?;
 
-    if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
-        let msg = resp["error"].as_str().unwrap_or("create failed").to_string();
-        return Err(AppError::Remote(msg));
-    }
+    check_rest_response(&resp)?;
 
-    let rec = resp.get("newRecord").cloned().unwrap_or(json!({}));
+    let result = resp["data"]["result"].clone();
     Ok(Json(json!({
-        "sys_id": rec["sys_id"],
-        "name":   rec["name"],
-        "table":  rec.get("tableName").cloned().unwrap_or(json!(table)),
-        "scope":  rec["scope"],
+        "sys_id": result["sys_id"],
+        "table":  table,
+        "record": result,
     })))
 }
 
@@ -235,5 +226,28 @@ pub async fn delete(
         "table":   table,
         "sys_id":  sys_id,
         "deleted": true,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /records/:table/schema  — inspect a table's field metadata
+// ---------------------------------------------------------------------------
+
+pub async fn schema(
+    State(s): State<AppState>,
+    Path(table): Path<String>,
+    Query(p): Query<GetParams>,
+) -> Result<Json<Value>, AppError> {
+    let resp = s
+        .call(json!({
+            "action":    "requestTableStructure",
+            "instance":  p.instance,
+            "tableName": table,
+        }))
+        .await?;
+
+    Ok(Json(json!({
+        "table":  table,
+        "fields": resp.get("fields").cloned().unwrap_or(json!([])),
     })))
 }

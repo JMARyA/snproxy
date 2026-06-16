@@ -164,13 +164,28 @@ Execute an SN Utils slash command in the Helper Tab.
 
 ## Raw passthrough
 
-Use `POST /raw` to send any JSON payload directly to the Helper Tab and receive the correlated response.  Useful for actions not covered by the higher-level endpoints or for experimentation.
+Use `POST /raw` to send any JSON payload directly to the Helper Tab.
+
+By default it blocks until the browser echoes back the `agentRequestId` (useful for actions
+that return a result).  Set `"fire_and_forget": true` for actions that don't send a correlated
+reply — otherwise the call will block until the timeout.
 
 ```json
 {
-  "action": "someUndocumentedAction",
+  "action": "someAction",
   "instance": "dev12345.service-now.com",
   "customParam": "value"
+}
+```
+
+Fire-and-forget (e.g. `bannerMessage`, `runSlashCommand`):
+```json
+{
+  "fire_and_forget": true,
+  "action": "bannerMessage",
+  "instance": "dev12345.service-now.com",
+  "message": "hello from snproxy",
+  "class": "alert alert-info"
 }
 ```
 
