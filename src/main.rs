@@ -2,6 +2,8 @@ mod api;
 mod state;
 mod ws;
 
+use tower_http::trace::TraceLayer;
+
 use clap::Parser;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -45,7 +47,7 @@ async fn main() {
         ws::serve(ws_state, ws_host, ws_port).await;
     });
 
-    let app = api::router(state);
+    let app = api::router(state).layer(TraceLayer::new_for_http());
     let http_addr = format!("{}:{}", cli.host, cli.port);
     let listener = tokio::net::TcpListener::bind(&http_addr)
         .await

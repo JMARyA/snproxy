@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub async fn serve(state: AppState, host: String, port: u16) {
     let addr = format!("{host}:{port}");
@@ -59,6 +59,15 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
     // Pump outbound messages (HTTP handlers → Helper Tab)
     let out_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
+            // Log the action + req_id for every outbound frame
+            if let Ok(val) = serde_json::from_str::<Value>(&msg) {
+                let action = val.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+                let req_id = val
+                    .get("agentRequestId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                debug!(%action, %req_id, "→ WS send");
+            }
             if sink.send(Message::Text(msg)).await.is_err() {
                 break;
             }
@@ -70,17 +79,31 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
         match result {
             Ok(Message::Text(text)) => match serde_json::from_str::<Value>(&text) {
                 Ok(val) => {
+                    let action = val
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+
                     // Route to a specific pending caller if agentRequestId is present
                     if let Some(id) = val.get("agentRequestId").and_then(|v| v.as_str()) {
                         let mut pending = state.pending.lock().await;
                         if let Some(tx) = pending.remove(id) {
+                            debug!(%action, req_id = %id, "← WS recv (matched)");
                             let _ = tx.send(val.clone());
+                        } else {
+                            // Response arrived after timeout or for a fire-and-forget
+                            debug!(%action, req_id = %id, "← WS recv (no pending caller)");
                         }
+                    } else {
+                        // Unsolicited message (e.g. async push from the Helper Tab)
+                        debug!(%action, "← WS recv (unsolicited)");
                     }
+
                     // Always broadcast to SSE regardless
                     let _ = state.event_tx.send(val);
                 }
-                Err(_) => {
+                Err(e) => {
+                    warn!("← WS recv non-JSON ({e}): {}", &text[..text.len().min(120)]);
                     let _ = state.event_tx.send(json!({"raw": text.as_str()}));
                 }
             },

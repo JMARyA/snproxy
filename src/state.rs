@@ -5,6 +5,7 @@ use axum::{
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tracing::{debug, warn};
 
 static REQ_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -57,19 +58,40 @@ impl AppState {
         let req_id = new_req_id();
         payload["agentRequestId"] = json!(&req_id);
 
+        let action = payload
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_owned();
+        let instance = payload
+            .get("instance")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_owned();
+
+        debug!(%req_id, %action, %instance, "→ sending to Helper Tab");
+
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(req_id.clone(), tx);
 
         if let Err(e) = self.fire(payload).await {
             self.pending.lock().await.remove(&req_id);
+            warn!(%req_id, %action, "send failed: {e:?}");
             return Err(e);
         }
 
         match tokio::time::timeout(Duration::from_secs(self.timeout_secs), rx).await {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(_)) => Err(AppError::ChannelClosed),
+            Ok(Ok(val)) => {
+                debug!(%req_id, %action, "← response received");
+                Ok(val)
+            }
+            Ok(Err(_)) => {
+                warn!(%req_id, %action, "response channel closed unexpectedly");
+                Err(AppError::ChannelClosed)
+            }
             Err(_) => {
                 self.pending.lock().await.remove(&req_id);
+                warn!(%req_id, %action, timeout_secs = self.timeout_secs, "timed out waiting for Helper Tab");
                 Err(AppError::Timeout)
             }
         }

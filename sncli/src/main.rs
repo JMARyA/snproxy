@@ -421,6 +421,17 @@ fn coerce_value(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
 }
 
+/// Normalise an instance identifier to a full hostname.
+/// "cancomdev" → "cancomdev.service-now.com"
+/// "cancomdev.service-now.com" → unchanged
+fn normalize_instance(s: &str) -> String {
+    if s.contains('.') {
+        s.to_string()
+    } else {
+        format!("{s}.service-now.com")
+    }
+}
+
 /// Single HTTP helper — reads body as text first so non-JSON error
 /// responses (e.g. axum's plain-text query-param rejections) are
 /// always surfaced clearly rather than producing a cryptic EOF.
@@ -539,7 +550,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let mut url = format!(
                     "{server}/records/{table}?instance={inst}&limit={limit}",
                     table = urlenc(&a.table),
-                    inst = urlenc(&a.instance),
+                    inst = urlenc(&normalize_instance(&a.instance)),
                     limit = a.limit,
                 );
                 if let Some(q) = &a.query {
@@ -560,7 +571,7 @@ async fn run(cli: Cli) -> Result<()> {
                     "{server}/records/{table}/{sys_id}?instance={inst}",
                     table = urlenc(&a.table),
                     sys_id = urlenc(&a.sys_id),
-                    inst = urlenc(&a.instance),
+                    inst = urlenc(&normalize_instance(&a.instance)),
                 );
                 if let Some(f) = &a.fields {
                     url.push_str(&format!("&fields={}", urlenc(f)));
@@ -573,7 +584,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let url = format!(
                     "{server}/records/{table}/schema?instance={inst}",
                     table = urlenc(&a.table),
-                    inst = urlenc(&a.instance),
+                    inst = urlenc(&normalize_instance(&a.instance)),
                 );
                 let res = get!(url);
                 print_json(&res, raw);
@@ -581,14 +592,14 @@ async fn run(cli: Cli) -> Result<()> {
 
             RecordsCmd::Create(a) => {
                 let fields = parse_fields(&a.fields)?;
-                let body = json!({ "instance": a.instance, "fields": fields });
+                let body = json!({ "instance": normalize_instance(&a.instance), "fields": fields });
                 let res = post!(format!("{server}/records/{}", urlenc(&a.table)), body);
                 print_json(&res, raw);
             }
 
             RecordsCmd::Update(a) => {
                 let fields = parse_fields(&a.fields)?;
-                let body = json!({ "instance": a.instance, "fields": fields });
+                let body = json!({ "instance": normalize_instance(&a.instance), "fields": fields });
                 let res = patch!(
                     format!("{server}/records/{}/{}", urlenc(&a.table), urlenc(&a.sys_id)),
                     body
@@ -602,7 +613,7 @@ async fn run(cli: Cli) -> Result<()> {
                     "{server}/records/{table}/{sys_id}?instance={inst}",
                     table = urlenc(&a.table),
                     sys_id = urlenc(&a.sys_id),
-                    inst = urlenc(&a.instance),
+                    inst = urlenc(&normalize_instance(&a.instance)),
                 );
                 let res = delete!(url);
                 print_json(&res, raw);
@@ -617,7 +628,7 @@ async fn run(cli: Cli) -> Result<()> {
                         .with_context(|| format!("reading {}", path.display()))?,
                     (None, None) => bail!("provide --script or --file"),
                 };
-                let body = json!({ "instance": a.instance, "script": script });
+                let body = json!({ "instance": normalize_instance(&a.instance), "script": script });
                 let res = post!(format!("{server}/scripts/bg"), body);
                 if raw {
                     print_json(&res, true);
@@ -630,7 +641,7 @@ async fn run(cli: Cli) -> Result<()> {
 
             ScriptsCmd::Slash(a) => {
                 let mut body = json!({
-                    "instance": a.instance,
+                    "instance": normalize_instance(&a.instance),
                     "command":  a.command,
                     "auto_run": !a.no_auto_run,
                 });
@@ -647,7 +658,7 @@ async fn run(cli: Cli) -> Result<()> {
 
         Cmd::Rest(a) => {
             let mut body = json!({
-                "instance": a.instance,
+                "instance": normalize_instance(&a.instance),
                 "method":   a.method.to_uppercase(),
                 "endpoint": a.endpoint,
             });
@@ -665,7 +676,7 @@ async fn run(cli: Cli) -> Result<()> {
             BrowserCmd::Form(a) => {
                 let mut url = format!(
                     "{server}/browser/form?instance={inst}",
-                    inst = urlenc(&a.instance),
+                    inst = urlenc(&normalize_instance(&a.instance)),
                 );
                 if let Some(u) = &a.url {
                     url.push_str(&format!("&url={}", urlenc(u)));
@@ -682,7 +693,7 @@ async fn run(cli: Cli) -> Result<()> {
 
             BrowserCmd::SetField(a) => {
                 let mut body = json!({
-                    "instance": a.instance,
+                    "instance": normalize_instance(&a.instance),
                     "field":    a.field,
                     "value":    coerce_value(&a.value),
                 });
@@ -796,7 +807,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             fields.insert("name".to_string(), json!(a.name));
             let body = json!({
-                "instance": a.instance,
+                "instance": normalize_instance(&a.instance),
                 "table":    a.table,
                 "scope":    a.scope,
                 "fields":   fields,
