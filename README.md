@@ -1,190 +1,182 @@
-# snproxy
+# sn-tools
 
-A local REST API proxy for ServiceNow, built on top of the SN Utils browser extension's
-internal WebSocket channel.
+A suite of local tools for ServiceNow, built on top of the SN Utils browser extension's
+authenticated WebSocket channel — no OAuth, no API keys, no IP allowlist changes required.
+
+| Tool | What it is |
+|------|-----------|
+| **snproxy** | Daemon that holds the browser session and exposes a local HTTP REST API |
+| **sncli** | CLI for scripts, record CRUD, and schema queries |
+| **sntui** | Terminal UI — browse tables, drill into records, follow references |
+| **snstate** | Terraform-like state management: pull records to disk, push changes back |
 
 ---
 
 ## The problem
 
 ServiceNow instances live behind SSO, session cookies, and IP allowlists. Getting programmatic
-access from a local tool — a script, an MCP server, a CI job — usually means fighting through
-some combination of:
+access from a local tool usually means fighting through OAuth service accounts, expiring API
+keys, or basic auth that SSO-only orgs have disabled. Every "simple" path hits a wall that
+requires someone with elevated access to unblock. Meanwhile the browser just works — because
+you already have a session.
 
-- OAuth service accounts that need an admin to provision
-- REST API keys that expire or get locked to specific IP ranges  
-- Basic auth that SSO-only orgs have disabled entirely
-- Personal auth tokens that the instance has turned off
+## How it works
 
-Every "simple" path hits a wall that requires someone with elevated access to unblock.
-Meanwhile the browser just… works, because you already have a session.
-
----
-
-## The hack
-
-[SN Utils](https://snutils.com) is a browser extension for ServiceNow power-users. It ships
-two pieces that matter here:
-
-1. **The VS Code extension** (`sn-scriptsync`) — syncs ServiceNow scripts to disk. It starts a
-   WebSocket server on `ws://127.0.0.1:1978/` so it can talk to the browser.
-2. **The Helper Tab** — a special browser tab that the extension keeps open. It connects to the
-   WS server and acts as a relay: it has your authenticated browser session and will execute
-   whatever commands come through the socket — queries, script runs, field writes, screenshots,
-   the lot.
-
-The critical detail: the Helper Tab is running in your browser with your SSO session already
-established. It doesn't re-authenticate. It just uses the existing cookies.
-
-The WS server checks the HTTP `Origin` header on upgrade, but only rejects `http://` and
-`https://` origins. A local script connecting without an `Origin` header (or with a
-`chrome-extension://` origin) passes straight through.
-
-So: **replace the VS Code extension's WS server with our own**. The Helper Tab connects to us
-instead. We hold that authenticated socket and front it with a normal HTTP REST API that any
-tool can call.
+[SN Utils](https://snutils.com) ships a Helper Tab — a browser tab that connects to VS Code's
+`sn-scriptsync` on `ws://127.0.0.1:1978` and relays authenticated ServiceNow commands through
+your existing session. **snproxy replaces the VS Code WS server**. The Helper Tab connects to
+snproxy instead; snproxy holds that socket and fronts it with a local HTTP REST API.
 
 ```
-┌─────────────────────────────────────┐
-│  Chrome — SN Utils Helper Tab       │
-│  (authenticated session, all orgs)  │
-└──────────────┬──────────────────────┘
-               │  ws://127.0.0.1:1978/
-               ▼
-┌─────────────────────────────────────┐
-│  snproxy  (this program)            │
-│                                     │
-│  WS server  ←→  HTTP REST  :8766   │
-└──────────────┬──────────────────────┘
-               │  HTTP JSON
-               ▼
-   curl / MCP server / any tool
+┌──────────────────────────────────────────┐
+│  Browser — SN Utils Helper Tab           │
+│  (your authenticated session, all orgs)  │
+└─────────────────┬────────────────────────┘
+                  │  ws://127.0.0.1:1978
+                  ▼
+┌──────────────────────────────────────────┐
+│  snproxy                                 │
+│  WS server  ←→  HTTP REST :8766         │
+└─────────────────┬────────────────────────┘
+                  │  HTTP JSON
+          ┌───────┴────────┐
+         sncli           sntui
+         snstate          curl / MCP
 ```
 
-No tokens. No admin. No IP allowlists. Just the browser session you already have.
+No tokens. No admin. No IP allowlists.
 
 ---
 
 ## Prerequisites
 
-1. Chrome (or any Chromium browser) with the [SN Utils extension](https://snutils.com) installed
-2. The Helper Tab open (`snutils helper` from the extension menu)
-3. Your ServiceNow instance approved in the Helper Tab (one-time click, persists across restarts)
-4. **VS Code with sn-scriptsync must NOT be running** — it would conflict on port 1978
+1. Chromium browser with [SN Utils](https://snutils.com) installed
+2. Helper Tab open (from the extension menu)
+3. **VS Code `sn-scriptsync` must NOT be running** — it owns the same port 1978
 
 ---
 
-## Build
+## Build & install
 
 ```bash
-cargo build --release
+cargo build --release          # all four binaries → target/release/
+nix build .#snproxy            # reproducible Nix build
+nix build .#sncli
+nix build .#sntui
+nix build .#snstate
+nix develop                    # dev shell with cargo, rust-analyzer, websocat, jq
 ```
 
-Binary lands at `target/release/snproxy`. Or with Nix:
-
-```bash
-nix build          # output at ./result/bin/snproxy
-nix develop        # drop into a shell with cargo, rust-analyzer, websocat, jq
-```
+A NixOS module is included — `services.snproxy.enable = true` installs and starts everything.
 
 ---
 
-## Run
+## snproxy
+
+The daemon. Run it once; everything else talks to it.
 
 ```bash
-./target/release/snproxy
+snproxy [--host 127.0.0.1] [--ws-port 1978] [--port 8766] [--timeout 30]
 ```
 
-```
-snproxy
-  WebSocket (Helper Tab) : ws://127.0.0.1:1978
-  HTTP REST API          : http://127.0.0.1:8766
-  Event stream (SSE)     : http://127.0.0.1:8766/events
+Open the Helper Tab in your browser — it connects automatically. Once connected, run `/token`
+from any SN instance tab to register that instance.
 
-Waiting for SN Utils Helper Tab to connect...
-```
+`RUST_LOG=debug` logs every WS frame. `RUST_LOG=trace` logs full raw payloads.
 
-Open the Helper Tab in Chrome. It will connect automatically (it polls for the WS server).
-The banner in the Helper Tab will confirm the connection.
+**API surface** (all endpoints block until the SN response arrives):
 
-```
---host <HOST>       Bind address [default: 127.0.0.1]
---ws-port <PORT>    WebSocket port [default: 1978]
---port <PORT>       HTTP API port [default: 8766]
---timeout <SECS>    Response wait timeout [default: 30]
-```
+| Route | What it does |
+|-------|-------------|
+| `GET /health` | Connection status |
+| `GET /records/:table` | Query records (`?q=`, `?fields=`, `?limit=`, `?display_value=`) |
+| `GET /records/:table/:sys_id` | Fetch one record (`?display_value=false\|true\|all`) |
+| `POST/PATCH/DELETE /records/:table[/:sys_id]` | Create / update / delete |
+| `GET /records/:table/schema` | Table column metadata |
+| `POST /scripts/bg` | Run a server-side Glide script, returns parsed output |
+| `POST /scripts/slash` | Run an SN Utils slash command |
+| `POST /rest` | Proxy any SN REST call through the browser session |
+| `GET/POST /browser/form` | Read / set form fields in the active tab |
+| `POST /browser/navigate` | Navigate a tab to a URL |
+| `POST /browser/screenshot` | Capture a tab as PNG (base64) |
+| `GET /events` | SSE stream of all inbound WS messages |
+
+> `agentRestApi` (used by `/rest` and `GET`/`PATCH`/`DELETE /records`) requires **SN Utils Pro**.
+> Record listing via `agentQueryRecords` works on the free tier.
 
 ---
 
-## API overview
+## sncli
 
-All endpoints accept and return JSON. Endpoints that call ServiceNow block until the response
-arrives (up to `--timeout` seconds), then return the result directly in the HTTP response.
-
-### Health
+Single-binary CLI. Instance via `--instance`/`-i` or `$SNPROXY_INSTANCE`.
 
 ```bash
-curl http://127.0.0.1:8766/health
-# {"status":"ready","helper_tab_connected":true}
-```
+# Background scripts
+sncli scripts bg -i dev12345 -s 'gs.info(gs.getUserName())'
+sncli scripts bg -i dev12345 -f myscript.js --json   # structured JSON output
 
-### Quick examples
+# Records
+sncli records list incident -i dev12345 -q 'active=true' -l 10
+sncli records get  incident <sys_id> -i dev12345
+sncli records schema sys_user -i dev12345             # column metadata
 
-```bash
-# List open incidents
-curl 'http://127.0.0.1:8766/records/incident?instance=dev12345.service-now.com&q=active%3Dtrue&limit=5'
-
-# Run a Glide script and get the output synchronously
-curl -X POST http://127.0.0.1:8766/scripts/bg \
-  -H 'Content-Type: application/json' \
-  -d '{"instance":"dev12345.service-now.com","script":"gs.info(gs.getUserName())"}'
-
-# Proxy any ServiceNow REST call through the browser session
-curl -X POST http://127.0.0.1:8766/rest \
-  -H 'Content-Type: application/json' \
-  -d '{"instance":"dev12345.service-now.com","endpoint":"/api/now/table/sys_user","query_params":{"sysparm_limit":"3"}}'
-
-# Take a screenshot of the active SN tab
-curl -X POST http://127.0.0.1:8766/browser/screenshot \
-  -H 'Content-Type: application/json' \
-  -d '{"instance":"dev12345.service-now.com","url":"incident_list.do"}'
-
-# Stream all raw WebSocket events
-curl -N http://127.0.0.1:8766/events
-```
-
-### sncli
-
-The repo ships with `sncli`, a handy CLI client:
-
-```bash
-# Background scripts — clean parsed output
-sncli scripts bg -i dev12345 -s 'gs.info("hello"); gs.print("world")'
-
-# Structured JSON with lines array
-sncli scripts bg --json -i dev12345 -s 'gs.info("hello")'
-
-# Read script from file
-sncli scripts bg -i dev12345 -f myscript.js
-
-# Query records
-sncli records list incident -l 5 -i dev12345
-sncli records get -i dev12345 incident some_sys_id
+# Slash commands
+sncli scripts slash -i dev12345 -c /token
 ```
 
 ---
 
-## API reference
+## sntui
 
-| Area | Doc |
-|------|-----|
-| Record CRUD + schema (`GET/POST/PATCH/DELETE /records/:table`, `GET /records/:table/schema`) | [docs/records.md](docs/records.md) |
-| Background scripts & slash commands (`/scripts/*`) | [docs/scripts.md](docs/scripts.md) |
-| Browser-authenticated REST passthrough (`/rest`) | [docs/rest.md](docs/rest.md) |
-| Browser automation — forms, navigation, screenshots (`/browser/*`) | [docs/browser.md](docs/browser.md) |
-| Context switching — update set, scope, domain (`/context`) | [docs/context.md](docs/context.md) |
-| Development artifact creation (`/artifacts`) | [docs/artifacts.md](docs/artifacts.md) |
-| Raw WebSocket passthrough & protocol internals (`/raw`, `/events`) | [docs/protocol.md](docs/protocol.md) |
+Interactive terminal UI. Keyboard-driven table browser with live data from snproxy.
+
+```bash
+sntui [--port 8766]
+```
+
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` or `j`/`k` | Move cursor |
+| `Enter` | Open record / follow reference field |
+| `Esc` / `q` | Back (unwinds reference chain step by step) |
+| `f` | Filter |
+| `r` | Refresh |
+| `s` | Script runner overlay |
+| `g` / `G` | Jump to top / bottom |
+
+The detail view fetches with `display_value=all`: reference fields show their display name
+(cyan) instead of a raw sys_id. Cursor a reference field and press Enter to open that record —
+Esc walks back up the chain, with `[Esc: back ×N]` in the title showing depth. Schema is
+loaded automatically and cached to `~/.cache/snproxy/schema/` (1-hour TTL) so column labels
+appear as headers instead of raw field names.
+
+---
+
+## snstate
+
+Manages ServiceNow records as local TOML files — pull them down, edit, push changes back.
+
+```bash
+snstate pull incident -i dev12345 -q 'active=true' -d ./state
+snstate status                         # diff local vs baseline, no network needed
+snstate plan   -i dev12345 -d ./state  # show what push would change (live SN fetch)
+snstate push   -i dev12345 -d ./state  # PATCH changed records, POST new ones
+snstate push   --dry-run               # preview without sending
+```
+
+**File layout** — one TOML file per record:
+
+```
+state/
+  incident/
+    <sys_id>.toml        ← editable desired state
+    <sys_id>.state.toml  ← baseline (last pulled / last pushed)
+```
+
+Each file has a `[_meta]` block (instance, table, sys_id) followed by flat field values.
+`push` skips records whose `.toml` matches `.state.toml` unless `--force` is passed. New
+records are created by dropping a `.toml` without a `sys_id` in `_meta`; after a successful
+POST the file is renamed to `<new_sys_id>.toml`.
 
 ---
 
@@ -192,9 +184,5 @@ sncli records get -i dev12345 incident some_sys_id
 
 **Port conflict**: snproxy and VS Code's sn-scriptsync both want `:1978`. Run one or the other.
 
-**One active Helper Tab**: the last Helper Tab to connect wins. Multiple tabs work, but only
-the most recent connection receives outbound commands.
-
-**`agentRestApi` requires SN Utils Pro** for the browser passthrough endpoints (`/rest`,
-and `GET`/`PATCH`/`DELETE /records`). Record listing via `agentQueryRecords` works on the
-free tier.
+**One active Helper Tab**: the last tab to connect wins. Multiple tabs work but only the most
+recent receives commands.
