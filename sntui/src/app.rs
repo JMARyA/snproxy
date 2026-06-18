@@ -5,6 +5,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+use sncore::{SchemaCache, SnTableMeta};
+
 use crate::client::{Client, HealthInfo};
 use crate::config::{Config, CustomList};
 use crate::tables::{self, Category, TableDef};
@@ -40,6 +42,7 @@ pub enum AppMsg {
     RecordsLoaded { table: String, records: Vec<Value> },
     RecordLoaded { record: Value },
     AllTablesLoaded(Vec<(String, String)>),
+    SchemaLoaded { table: String, meta: SnTableMeta },
     ScriptResult(Result<String, String>),
     Error(String),
 }
@@ -99,6 +102,10 @@ pub struct App {
     pub filter_buf: String,
     pub command_buf: String,
 
+    // schema
+    pub current_schema: Option<SnTableMeta>,
+    schema_cache: SchemaCache,
+
     // record detail
     pub detail_record: Option<Value>,
     pub detail_table: String,
@@ -152,6 +159,8 @@ impl App {
             current_table: String::new(),
             current_table_def: None,
             record_list_title: String::new(),
+            current_schema: None,
+            schema_cache: SchemaCache::new(),
             records: Vec::new(),
             record_cursor: 0,
             record_scroll: 0,
@@ -223,6 +232,27 @@ impl App {
                 Err(e) => {
                     let _ = tx.send(AppMsg::Error(e));
                 }
+            }
+        });
+    }
+
+    fn load_schema(&mut self, table: String) {
+        let instance = self.health.instance_name.clone();
+        // cache hit: send immediately without a network round-trip
+        if let Some(meta) = self.schema_cache.get(&instance, &table) {
+            let _ = self.msg_tx.send(AppMsg::SchemaLoaded { table, meta });
+            return;
+        }
+        let client = self.client.clone();
+        let cache = self.schema_cache.clone();
+        let tx = self.msg_tx.clone();
+        tokio::spawn(async move {
+            match client.schema(&table).await {
+                Ok(meta) => {
+                    cache.set(&instance, &table, &meta);
+                    let _ = tx.send(AppMsg::SchemaLoaded { table, meta });
+                }
+                Err(_) => {} // non-fatal: UI degrades gracefully without schema
             }
         });
     }
@@ -308,6 +338,11 @@ impl App {
                 self.all_tables_loading = false;
                 self.all_tables_cursor = 0;
             }
+            AppMsg::SchemaLoaded { table, meta } => {
+                if table == self.current_table {
+                    self.current_schema = Some(meta);
+                }
+            }
             AppMsg::ScriptResult(result) => {
                 self.script_running = false;
                 match result {
@@ -376,8 +411,10 @@ impl App {
             .map(|t| t.default_order.clone())
             .unwrap_or_default();
         self.record_filter = query.clone();
+        self.current_schema = None;
         self.push_view(BaseView::RecordList);
         self.load_records(name.to_string(), query, order);
+        self.load_schema(name.to_string());
     }
 
     fn open_custom_list(&mut self, name: String, table: String, query: String, order: String) {
@@ -393,8 +430,10 @@ impl App {
         } else {
             order
         };
+        self.current_schema = None;
         self.push_view(BaseView::RecordList);
-        self.load_records(table, query, effective_order);
+        self.load_records(table.clone(), query, effective_order);
+        self.load_schema(table);
     }
 
     fn open_detail(&mut self) {

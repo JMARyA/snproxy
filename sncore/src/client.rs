@@ -1,6 +1,8 @@
 use serde_json::Value;
 use std::time::Duration;
 
+use crate::types::SnTableMeta;
+
 #[derive(Debug, Clone, Default)]
 pub struct HealthInfo {
     pub status: String, // "ready" | "no_session" | "waiting"
@@ -157,5 +159,26 @@ impl Client {
                 Some((name, label))
             })
             .collect())
+    }
+
+    pub async fn schema(&self, table: &str) -> Result<SnTableMeta, String> {
+        let resp = self
+            .http
+            .get(format!("{}/records/{table}/schema", self.base_url))
+            .query(&[("instance", "auto")])
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+
+        let j: Value = resp.json().await.map_err(|e| e.to_string())?;
+        Ok(SnTableMeta {
+            label:   j["label"].as_str().unwrap_or(table).to_string(),
+            name:    j["table"].as_str().unwrap_or(table).to_string(),
+            columns: serde_json::from_value(j["columns"].clone()).unwrap_or_default(),
+        })
     }
 }

@@ -402,7 +402,16 @@ pub fn render_record_list(f: &mut Frame, app: &App, area: Rect) {
 
     let header_cells: Vec<Cell> = columns
         .iter()
-        .map(|c| Cell::from(c.header.as_str()).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)))
+        .map(|c| {
+            // prefer schema label over hardcoded header
+            let label = app.current_schema
+                .as_ref()
+                .and_then(|s| s.columns.get(&c.field))
+                .map(|col| col.label.as_str())
+                .filter(|l| !l.is_empty())
+                .unwrap_or(c.header.as_str());
+            Cell::from(label.to_string()).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        })
         .collect();
     let header = Row::new(header_cells).style(Style::default().bg(Color::Rgb(25, 25, 45)));
 
@@ -495,8 +504,26 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|&k| {
             let val = obj.get(k).map(display_value).unwrap_or_default();
+
+            let col = app.current_schema.as_ref().and_then(|s| s.columns.get(k));
+            let key_text = match col {
+                Some(c) if !c.label.is_empty() && c.label != k => {
+                    if c.is_reference() && !c.reference.is_empty() {
+                        format!("{} →{}", c.label, c.reference)
+                    } else {
+                        c.label.clone()
+                    }
+                }
+                _ => k.to_string(),
+            };
+            let key_style = if col.map(|c| c.mandatory).unwrap_or(false) {
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_ACCENT)
+            };
+
             Row::new(vec![
-                Cell::from(k).style(Style::default().fg(C_ACCENT)),
+                Cell::from(key_text).style(key_style),
                 Cell::from(val).style(Style::default().fg(Color::White)),
             ])
         })
