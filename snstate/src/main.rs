@@ -48,7 +48,7 @@ struct Cli {
     #[arg(long, default_value = "http://localhost:8766", env = "SNPROXY_URL")]
     server: String,
     /// Working directory containing <table>/<sys_id>.toml files
-    #[arg(long, short = 'd', default_value = ".")]
+    #[arg(long, short = 'd', default_value = "./res")]
     dir: PathBuf,
     #[command(subcommand)]
     command: Cmd,
@@ -72,16 +72,18 @@ enum Cmd {
 struct PullArgs {
     /// Table to import (e.g. incident, cmdb_ci, sys_script_include)
     table: String,
+    /// Pull a single record by sys_id instead of querying the list
+    sys_id: Option<String>,
     /// ServiceNow instance hostname or short name
     #[arg(long, short = 'i', env = "SNPROXY_INSTANCE")]
     instance: String,
-    /// Encoded query, e.g. "active=true^category=software"
+    /// Encoded query, e.g. "active=true^category=software" (list mode only)
     #[arg(long, short = 'q')]
     query: Option<String>,
-    /// Comma-separated fields to import (sys_id is always added)
+    /// Comma-separated fields to store (omit for all fields)
     #[arg(long, short = 'f')]
     fields: Option<String>,
-    /// Max records to import
+    /// Max records to import (list mode only)
     #[arg(long, short = 'l', default_value_t = 100)]
     limit: u32,
 }
@@ -329,46 +331,68 @@ fn print_diff(changed: &[(String, String, String)], added: &[String]) {
 async fn cmd_pull(server: &str, dir: &Path, args: PullArgs) -> Result<()> {
     let client = Client::new();
     let instance = normalize_instance(&args.instance);
+    let fields_param = args.fields.as_deref().unwrap_or("").to_string();
 
-    let base_fields = args.fields.as_deref()
-        .unwrap_or("number,short_description,state,sys_updated_on");
-    let fields = if base_fields.split(',').any(|f| f.trim() == "sys_id") {
-        base_fields.to_string()
+    // Step 1: collect sys_ids to fetch — either the one provided, or query the list
+    let sys_ids: Vec<String> = if let Some(ref sid) = args.sys_id {
+        vec![sid.clone()]
     } else {
-        format!("sys_id,{base_fields}")
+        let mut url = format!(
+            "{server}/records/{table}?instance={inst}&limit={limit}&fields=sys_id",
+            table = urlenc(&args.table),
+            inst  = urlenc(&instance),
+            limit = args.limit,
+        );
+        if let Some(q) = &args.query {
+            url.push_str(&format!("&q={}", urlenc(q)));
+        }
+
+        let resp = api(&client, Method::GET, &url, None).await?;
+        let records = resp["records"].as_array().cloned().unwrap_or_default();
+        if records.is_empty() {
+            println!("No records returned for {}.", args.table);
+            return Ok(());
+        }
+        records.iter()
+            .filter_map(|r| r["sys_id"].as_str().filter(|s| !s.is_empty()).map(String::from))
+            .collect()
     };
 
-    let mut url = format!(
-        "{server}/records/{table}?instance={inst}&limit={limit}&fields={fields}",
-        table = urlenc(&args.table),
-        inst  = urlenc(&instance),
-        limit = args.limit,
-        fields = urlenc(&fields),
-    );
-    if let Some(q) = &args.query {
-        url.push_str(&format!("&q={}", urlenc(q)));
-    }
-
-    let resp = api(&client, Method::GET, &url, None).await?;
-    let records = resp["records"].as_array().cloned().unwrap_or_default();
-
-    if records.is_empty() {
+    if sys_ids.is_empty() {
         println!("No records returned for {}.", args.table);
         return Ok(());
     }
 
+    // Step 2: fetch each record individually to get full field data (agentQueryRecords
+    // only returns sys_id; agentRestApi GET returns all fields).
     let mut written = 0usize;
-    for record in &records {
-        let sys_id = match record["sys_id"].as_str().filter(|s| !s.is_empty()) {
-            Some(id) => id,
-            None => { eprintln!("  skip: record missing sys_id"); continue; }
+    for sys_id in &sys_ids {
+        let mut record_url = format!(
+            "{server}/records/{t}/{s}?instance={inst}",
+            t    = urlenc(&args.table),
+            s    = urlenc(sys_id),
+            inst = urlenc(&instance),
+        );
+        if !fields_param.is_empty() {
+            record_url.push_str(&format!("&fields={}", urlenc(&fields_param)));
+        }
+
+        let resp = match api(&client, Method::GET, &record_url, None).await {
+            Ok(v)  => v,
+            Err(e) => { eprintln!("  skip {sys_id}: {e}"); continue; }
         };
 
-        // Build file object: scalars first (so _meta ends up at bottom in TOML output),
-        // then _meta.
+        let record = &resp["record"];
+        if record.is_null() {
+            eprintln!("  skip {sys_id}: no record in response");
+            continue;
+        }
+
         let mut file = Map::new();
-        for (k, v) in record.as_object().unwrap() {
-            file.insert(k.clone(), v.clone());
+        if let Some(obj) = record.as_object() {
+            for (k, v) in obj {
+                file.insert(k.clone(), v.clone());
+            }
         }
         file.insert(META_KEY.to_string(), json!({
             "instance": instance,
