@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::{AppError, AppState};
+use crate::ws_protocol::WsCommand;
 
 // ---------------------------------------------------------------------------
 // PUT /context  — switch update set, application scope, or domain
@@ -10,7 +11,7 @@ use crate::state::{AppError, AppState};
 
 #[derive(Deserialize)]
 pub struct SwitchReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// "updateset" | "application" | "domain"
     #[serde(rename = "type")]
     pub switch_type: String,
@@ -41,20 +42,17 @@ pub async fn switch(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":     "switchContext",
-            "instance":   instance,
-            "switchType": switch_type,
-            "value":      r.value,
-            "reloadTab":  r.reload_tab,
-        }))
-        .await?;
+    let resp = s.call(WsCommand::SwitchContext {
+        instance,
+        switch_type,
+        value:      r.value,
+        reload_tab: r.reload_tab,
+    }).await?;
 
     Ok(Json(json!({
-        "switched":  true,
-        "type":      resp["switchType"],
-        "value":     resp["value"],
-        "reloaded":  resp["reloaded"],
+        "switched": true,
+        "type":     resp["switchType"],
+        "value":    resp["value"],
+        "reloaded": resp["reloaded"],
     })))
 }

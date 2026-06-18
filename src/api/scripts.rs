@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::{AppError, AppState};
+use crate::ws_protocol::WsCommand;
 
 // ---------------------------------------------------------------------------
 // POST /scripts/bg  — run a server-side Glide script, block for output
@@ -10,14 +11,11 @@ use crate::state::{AppError, AppState};
 
 #[derive(Deserialize)]
 pub struct BgReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// Full server-side JavaScript to execute (gs.*, GlideRecord, etc.)
     pub script: String,
 }
 
-/// Executes via `agentRunBackgroundScript` — a fully correlated call that
-/// returns the captured script output synchronously.  Unlike the old fire-and-
-/// forget `/bg`, this blocks until ServiceNow finishes running the script.
 pub async fn bg(
     State(s): State<AppState>,
     Json(r): Json<BgReq>,
@@ -27,14 +25,10 @@ pub async fn bg(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":   "agentRunBackgroundScript",
-            "instance": instance,
-            "script":   r.script,
-            "appName":  "snproxy",
-        }))
-        .await?;
+    let resp = s.call(WsCommand::BackgroundScript {
+        instance,
+        script: r.script,
+    }).await?;
 
     if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = resp["error"].as_str().unwrap_or("script failed").to_string();
@@ -71,8 +65,8 @@ pub async fn bg(
 
     Ok(Json(json!({
         "executed": true,
-        "output": output,
-        "lines": lines,
+        "output":   output,
+        "lines":    lines,
     })))
 }
 
@@ -82,7 +76,7 @@ pub async fn bg(
 
 #[derive(Deserialize)]
 pub struct SlashReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// Full slash command including the leading slash, e.g. "/token" or "/tn"
     pub command: String,
     /// URL pattern to match the target tab (default: any SN tab)
@@ -104,26 +98,17 @@ pub async fn slash(
         return Err(AppError::BadRequest("command cannot be empty".into()));
     }
 
-    let instance = s.get_sn_instance().await?;
-    let mut payload = json!({
-        "action":   "runSlashCommand",
-        "instance": instance,
-        "command":  r.command,
-        "autoRun":  r.auto_run,
-    });
-    if let Some(url) = r.url {
-        payload["url"] = json!(url);
-    }
-    if let Some(tab_id) = r.tab_id {
-        payload["tabId"] = tab_id;
-    }
-
-    let resp = s.call(payload).await?;
+    let resp = s.call(WsCommand::SlashCommand {
+        command:  r.command,
+        auto_run: r.auto_run,
+        url:      r.url,
+        tab_id:   r.tab_id,
+    }).await?;
 
     Ok(Json(json!({
-        "executed":  true,
-        "command":   resp["command"],
-        "tab_id":    resp["tabId"],
-        "auto_run":  resp["autoRun"],
+        "executed": true,
+        "command":  resp["command"],
+        "tab_id":   resp["tabId"],
+        "auto_run": resp["autoRun"],
     })))
 }

@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::state::{check_rest_response, AppError, AppState};
+use crate::ws_protocol::WsCommand;
 
 // ---------------------------------------------------------------------------
 // GET /records/:table
@@ -13,7 +14,7 @@ use crate::state::{check_rest_response, AppError, AppState};
 
 #[derive(Deserialize)]
 pub struct ListParams {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// ServiceNow encoded query, e.g. "active=true^category=software"
     #[serde(default)]
     pub q: String,
@@ -39,11 +40,10 @@ pub async fn list(
     Path(table): Path<String>,
     Query(p): Query<ListParams>,
 ) -> Result<Json<Value>, AppError> {
-    // Build the sysparm_query value (encoded query + optional ORDER BY)
     let sn_query = match (p.q.is_empty(), p.order_by.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => p.q.clone(),
-        (true, false) => p.order_by.clone(),
+        (true, true)   => String::new(),
+        (false, true)  => p.q.clone(),
+        (true, false)  => p.order_by.clone(),
         (false, false) => format!("{}^{}", p.q, p.order_by),
     };
 
@@ -53,14 +53,11 @@ pub async fn list(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":      "agentQueryRecords",
-            "instance":    instance,
-            "tableName":   table,
-            "queryString": query_string,
-        }))
-        .await?;
+    let resp = s.call(WsCommand::QueryRecords {
+        instance,
+        table_name: table.clone(),
+        query_string,
+    }).await?;
 
     let records = resp.get("records").cloned().unwrap_or(json!([]));
     let count = resp
@@ -69,8 +66,8 @@ pub async fn list(
         .unwrap_or_else(|| records.as_array().map(|a| a.len() as u64).unwrap_or(0));
 
     Ok(Json(json!({
-        "table": table,
-        "count": count,
+        "table":   table,
+        "count":   count,
         "records": records,
     })))
 }
@@ -81,7 +78,7 @@ pub async fn list(
 
 #[derive(Deserialize)]
 pub struct GetParams {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// Comma-separated field list; omit for all fields
     #[serde(default)]
     pub fields: String,
@@ -98,33 +95,30 @@ pub async fn get(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":      "agentRestApi",
-            "instance":    instance,
-            "method":      "GET",
-            "endpoint":    format!("/api/now/table/{table}/{sys_id}"),
-            "queryParams": query_params,
-            "appName":     "snproxy",
-        }))
-        .await?;
+    let resp = s.call(WsCommand::RestApi {
+        instance,
+        method: "GET".into(),
+        endpoint: format!("/api/now/table/{table}/{sys_id}"),
+        body: None,
+        query_params: Some(query_params),
+    }).await?;
 
     check_rest_response(&resp)?;
 
     Ok(Json(json!({
-        "table": table,
+        "table":  table,
         "sys_id": sys_id,
         "record": resp["data"]["result"].clone(),
     })))
 }
 
 // ---------------------------------------------------------------------------
-// POST /records/:table  — create via agentRestApi (works for any table)
+// POST /records/:table
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct CreateBody {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub fields: Map<String, Value>,
 }
 
@@ -138,16 +132,13 @@ pub async fn create(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":   "agentRestApi",
-            "instance": instance,
-            "method":   "POST",
-            "endpoint": format!("/api/now/table/{table}"),
-            "body":     body.fields,
-            "appName":  "snproxy",
-        }))
-        .await?;
+    let resp = s.call(WsCommand::RestApi {
+        instance,
+        method: "POST".into(),
+        endpoint: format!("/api/now/table/{table}"),
+        body: Some(Value::Object(body.fields)),
+        query_params: None,
+    }).await?;
 
     check_rest_response(&resp)?;
 
@@ -160,12 +151,12 @@ pub async fn create(
 }
 
 // ---------------------------------------------------------------------------
-// PATCH /records/:table/:sys_id  — update fields via agentRestApi PATCH
+// PATCH /records/:table/:sys_id
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct UpdateBody {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub fields: Map<String, Value>,
 }
 
@@ -179,16 +170,13 @@ pub async fn update(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":   "agentRestApi",
-            "instance": instance,
-            "method":   "PATCH",
-            "endpoint": format!("/api/now/table/{table}/{sys_id}"),
-            "body":     body.fields,
-            "appName":  "snproxy",
-        }))
-        .await?;
+    let resp = s.call(WsCommand::RestApi {
+        instance,
+        method: "PATCH".into(),
+        endpoint: format!("/api/now/table/{table}/{sys_id}"),
+        body: Some(Value::Object(body.fields)),
+        query_params: None,
+    }).await?;
 
     check_rest_response(&resp)?;
 
@@ -206,24 +194,22 @@ pub async fn update(
 
 #[derive(Deserialize)]
 pub struct DeleteParams {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
 }
 
 pub async fn delete(
     State(s): State<AppState>,
     Path((table, sys_id)): Path<(String, String)>,
-    Query(p): Query<DeleteParams>,
+    Query(_p): Query<DeleteParams>,
 ) -> Result<Json<Value>, AppError> {
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":   "agentRestApi",
-            "instance": instance,
-            "method":   "DELETE",
-            "endpoint": format!("/api/now/table/{table}/{sys_id}"),
-            "appName":  "snproxy",
-        }))
-        .await?;
+    let resp = s.call(WsCommand::RestApi {
+        instance,
+        method: "DELETE".into(),
+        endpoint: format!("/api/now/table/{table}/{sys_id}"),
+        body: None,
+        query_params: None,
+    }).await?;
 
     check_rest_response(&resp)?;
 
@@ -235,25 +221,30 @@ pub async fn delete(
 }
 
 // ---------------------------------------------------------------------------
-// GET /records/:table/schema  — inspect a table's field metadata
+// GET /records/:table/schema
 // ---------------------------------------------------------------------------
 
 pub async fn schema(
     State(s): State<AppState>,
     Path(table): Path<String>,
-    Query(p): Query<GetParams>,
+    Query(_p): Query<GetParams>,
 ) -> Result<Json<Value>, AppError> {
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":    "requestTableStructure",
-            "instance":  instance,
-            "tableName": table,
-        }))
-        .await?;
+    let resp = s.call(WsCommand::TableStructure {
+        instance,
+        table_name: table.clone(),
+    }).await?;
+
+    // The extension fetches /api/now/ui/meta/:table and wraps the response in
+    // resp.result.  Fields are an object keyed by field name, not an array.
+    let fields = resp
+        .get("result")
+        .and_then(|r| r.get("fields"))
+        .cloned()
+        .unwrap_or(json!({}));
 
     Ok(Json(json!({
         "table":  table,
-        "fields": resp.get("fields").cloned().unwrap_or(json!([])),
+        "fields": fields,
     })))
 }

@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::state::{AppError, AppState};
+use crate::ws_protocol::WsCommand;
 
 // ---------------------------------------------------------------------------
 // POST /artifacts  — create a SN development artifact via createRecord
@@ -15,7 +16,7 @@ use crate::state::{AppError, AppState};
 
 #[derive(Deserialize)]
 pub struct CreateArtifactBody {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub table: String,
     #[serde(default = "default_scope")]
     pub scope: String,
@@ -39,15 +40,12 @@ pub async fn create(
     }
 
     let instance = s.get_sn_instance().await?;
-    let resp = s
-        .call(json!({
-            "action":    "createRecord",
-            "instance":  instance,
-            "tableName": r.table,
-            "scope":     r.scope,
-            "payload":   r.fields,
-        }))
-        .await?;
+    let resp = s.call(WsCommand::CreateArtifact {
+        instance,
+        table_name: r.table.clone(),
+        scope:      r.scope,
+        payload:    r.fields,
+    }).await?;
 
     if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = resp["error"]

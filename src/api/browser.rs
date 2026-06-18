@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::{AppError, AppState};
+use crate::ws_protocol::WsCommand;
 
 fn default_true() -> bool {
     true
@@ -17,7 +18,7 @@ fn default_true() -> bool {
 
 #[derive(Deserialize)]
 pub struct FormStateParams {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// URL pattern to target a specific tab
     pub url: Option<String>,
     pub tab_id: Option<String>,
@@ -29,21 +30,12 @@ pub async fn form_state(
     State(s): State<AppState>,
     Query(p): Query<FormStateParams>,
 ) -> Result<Json<Value>, AppError> {
-    let mut payload = json!({
-        "action":   "agentGetFormState",
-        "instance": p.instance,
-    });
-    if let Some(fields) = p.fields {
-        payload["fields"] = json!(fields.split(',').map(str::trim).collect::<Vec<_>>());
-    }
-    if let Some(url) = p.url {
-        payload["url"] = json!(url);
-    }
-    if let Some(tab_id) = p.tab_id {
-        payload["tabId"] = json!(tab_id);
-    }
-
-    let resp = s.call(payload).await?;
+    let fields = p.fields.map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
+    let resp = s.call(WsCommand::FormState {
+        url:    p.url,
+        tab_id: p.tab_id.map(Value::String),
+        fields,
+    }).await?;
 
     Ok(Json(json!({
         "table":         resp["table"],
@@ -59,7 +51,7 @@ pub async fn form_state(
 
 #[derive(Deserialize)]
 pub struct SetFieldReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub field: String,
     pub value: Value,
     /// Display value for reference fields
@@ -76,23 +68,13 @@ pub async fn set_field(
         return Err(AppError::BadRequest("field cannot be empty".into()));
     }
 
-    let mut payload = json!({
-        "action":   "agentSetField",
-        "instance": r.instance,
-        "field":    r.field,
-        "value":    r.value,
-    });
-    if let Some(dv) = r.display_value {
-        payload["displayValue"] = dv;
-    }
-    if let Some(url) = r.url {
-        payload["url"] = json!(url);
-    }
-    if let Some(tab_id) = r.tab_id {
-        payload["tabId"] = tab_id;
-    }
-
-    let resp = s.call(payload).await?;
+    let resp = s.call(WsCommand::SetField {
+        field:         r.field,
+        value:         r.value,
+        display_value: r.display_value,
+        url:           r.url,
+        tab_id:        r.tab_id,
+    }).await?;
 
     if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = resp["error"].as_str().unwrap_or("set_field failed").to_string();
@@ -112,7 +94,7 @@ pub async fn set_field(
 
 #[derive(Deserialize)]
 pub struct UiActionReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// "save" | "submit" | "sysverb_*" | any UI action name
     pub ui_action: String,
     #[serde(default = "default_true")]
@@ -129,20 +111,12 @@ pub async fn ui_action(
         return Err(AppError::BadRequest("ui_action cannot be empty".into()));
     }
 
-    let mut payload = json!({
-        "action":           "agentRunUiAction",
-        "instance":         r.instance,
-        "uiAction":         r.ui_action,
-        "suppressDialogs":  r.suppress_dialogs,
-    });
-    if let Some(url) = r.url {
-        payload["url"] = json!(url);
-    }
-    if let Some(tab_id) = r.tab_id {
-        payload["tabId"] = tab_id;
-    }
-
-    let resp = s.call(payload).await?;
+    let resp = s.call(WsCommand::UiAction {
+        ui_action:        r.ui_action,
+        suppress_dialogs: r.suppress_dialogs,
+        url:              r.url,
+        tab_id:           r.tab_id,
+    }).await?;
 
     if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = resp["error"].as_str().unwrap_or("ui_action failed").to_string();
@@ -161,7 +135,7 @@ pub async fn ui_action(
 
 #[derive(Deserialize)]
 pub struct NavigateReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub url: String,
     pub tab_id: Option<Value>,
     #[serde(default)]
@@ -180,19 +154,13 @@ pub async fn navigate(
         return Err(AppError::BadRequest("url cannot be empty".into()));
     }
 
-    let mut payload = json!({
-        "action":          "agentNavigate",
-        "instance":        r.instance,
-        "url":             r.url,
-        "newTab":          r.new_tab,
-        "waitForLoad":     r.wait_for_load,
-        "discardUnsaved":  r.discard_unsaved,
-    });
-    if let Some(tab_id) = r.tab_id {
-        payload["tabId"] = tab_id;
-    }
-
-    let resp = s.call(payload).await?;
+    let resp = s.call(WsCommand::Navigate {
+        url:             r.url,
+        new_tab:         r.new_tab,
+        wait_for_load:   r.wait_for_load,
+        discard_unsaved: r.discard_unsaved,
+        tab_id:          r.tab_id,
+    }).await?;
 
     Ok(Json(json!({
         "navigated": true,
@@ -208,7 +176,7 @@ pub async fn navigate(
 
 #[derive(Deserialize)]
 pub struct ClickReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub selector: String,
     #[serde(default = "default_true")]
     pub suppress_dialogs: bool,
@@ -224,20 +192,12 @@ pub async fn click(
         return Err(AppError::BadRequest("selector cannot be empty".into()));
     }
 
-    let mut payload = json!({
-        "action":          "agentClickElement",
-        "instance":        r.instance,
-        "selector":        r.selector,
-        "suppressDialogs": r.suppress_dialogs,
-    });
-    if let Some(url) = r.url {
-        payload["url"] = json!(url);
-    }
-    if let Some(tab_id) = r.tab_id {
-        payload["tabId"] = tab_id;
-    }
-
-    let resp = s.call(payload).await?;
+    let resp = s.call(WsCommand::ClickElement {
+        selector:         r.selector,
+        suppress_dialogs: r.suppress_dialogs,
+        url:              r.url,
+        tab_id:           r.tab_id,
+    }).await?;
 
     if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = resp["error"].as_str().unwrap_or("click failed").to_string();
@@ -256,7 +216,7 @@ pub async fn click(
 
 #[derive(Deserialize)]
 pub struct ScreenshotReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// URL to match / navigate to before capturing
     pub url: Option<String>,
     pub tab_id: Option<Value>,
@@ -273,23 +233,12 @@ pub async fn screenshot(
         return Err(AppError::BadRequest("url or tab_id is required".into()));
     }
 
-    let file_name = r.file_name.unwrap_or_else(|| "screenshot.png".to_string());
-
-    let mut payload = json!({
-        "action":   "takeScreenshot",
-        "instance": r.instance,
-        "exactUrl": r.exact_url,
-        "fileName": file_name,
-        "savePath": "/dev/null",   // VS Code writes the file; we return imageData
-    });
-    if let Some(url) = r.url {
-        payload["url"] = json!(url);
-    }
-    if let Some(tab_id) = r.tab_id {
-        payload["tabId"] = tab_id;
-    }
-
-    let resp = s.call(payload).await?;
+    let resp = s.call(WsCommand::Screenshot {
+        url:       r.url,
+        tab_id:    r.tab_id,
+        exact_url: r.exact_url,
+        file_name: r.file_name,
+    }).await?;
 
     if resp.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = resp["error"].as_str().unwrap_or("screenshot failed").to_string();
@@ -310,7 +259,7 @@ pub async fn screenshot(
 
 #[derive(Deserialize)]
 pub struct TabReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     pub url: String,
     #[serde(default)]
     pub reload: bool,
@@ -328,16 +277,12 @@ pub async fn tab(
         return Err(AppError::BadRequest("url cannot be empty".into()));
     }
 
-    let resp = s
-        .call(json!({
-            "action":          "activateTab",
-            "instance":        r.instance,
-            "url":             r.url,
-            "reload":          r.reload,
-            "waitForLoad":     r.wait_for_load,
-            "openIfNotFound":  r.open_if_not_found,
-        }))
-        .await?;
+    let resp = s.call(WsCommand::ActivateTab {
+        url:             r.url,
+        reload:          r.reload,
+        wait_for_load:   r.wait_for_load,
+        open_if_not_found: r.open_if_not_found,
+    }).await?;
 
     Ok(Json(json!({
         "tab_id":   resp["tabId"],

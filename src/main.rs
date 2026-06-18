@@ -1,6 +1,7 @@
 mod api;
 mod state;
 mod ws;
+mod ws_protocol;
 
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;

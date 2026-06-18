@@ -64,22 +64,32 @@ impl AppState {
             .map_err(|_| AppError::SendFailed)
     }
 
-    /// Inject a unique `agentRequestId`, send the message, and block until the
-    /// Helper Tab echoes that ID back in a response.  Fully concurrent — each
-    /// in-flight call waits on its own oneshot channel.
-    pub async fn call(&self, mut payload: Value) -> Result<Value, AppError> {
+    /// Serialize `cmd`, inject `agentRequestId` + `appName`, send to the Helper
+    /// Tab, and block until the correlated reply arrives.  Fully concurrent —
+    /// each in-flight call waits on its own oneshot channel.
+    ///
+    /// Accepts any `T: Serialize`: pass a [`WsCommand`] variant for typed
+    /// calls, or a raw [`serde_json::Value`] for the `/raw` passthrough.
+    pub async fn call<T: serde::Serialize>(&self, cmd: T) -> Result<Value, AppError> {
+        let mut payload = serde_json::to_value(cmd)
+            .map_err(|e| AppError::BadRequest(format!("command serialization error: {e}")))?;
+
         let req_id = new_req_id();
         payload["agentRequestId"] = json!(&req_id);
+        payload["appName"] = json!("snproxy");
 
         let action = payload
             .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("?")
             .to_owned();
+        // instance is an object {url,name,g_ck}; fall back to bare string for
+        // commands that pass it as a hostname (legacy / raw calls).
         let instance = payload
             .get("instance")
+            .and_then(|v| v.get("name").or(Some(v)))
             .and_then(|v| v.as_str())
-            .unwrap_or("?")
+            .unwrap_or("-")
             .to_owned();
 
         debug!(%req_id, %action, %instance, "→ sending to Helper Tab");

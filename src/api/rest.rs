@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::{check_rest_response, AppError, AppState};
+use crate::ws_protocol::WsCommand;
 
 // ---------------------------------------------------------------------------
 // POST /rest  — proxy any ServiceNow REST call through the browser session
@@ -10,7 +11,7 @@ use crate::state::{check_rest_response, AppError, AppState};
 
 #[derive(Deserialize)]
 pub struct RestReq {
-    pub instance: String,
+    #[allow(dead_code)] pub instance: String,
     /// HTTP method: GET POST PUT PATCH DELETE
     #[serde(default = "default_get")]
     pub method: String,
@@ -37,21 +38,14 @@ pub async fn handler(
     }
 
     let instance = s.get_sn_instance().await?;
-    let mut payload = json!({
-        "action":   "agentRestApi",
-        "instance": instance,
-        "method":   r.method.to_uppercase(),
-        "endpoint": r.endpoint,
-        "appName":  "snproxy",
-    });
-    if let Some(body) = r.body {
-        payload["body"] = body;
-    }
-    if let Some(qp) = r.query_params {
-        payload["queryParams"] = qp;
-    }
+    let resp = s.call(WsCommand::RestApi {
+        instance,
+        method:      r.method.to_uppercase(),
+        endpoint:    r.endpoint,
+        body:        r.body,
+        query_params: r.query_params,
+    }).await?;
 
-    let resp = s.call(payload).await?;
     check_rest_response(&resp)?;
 
     Ok(Json(json!({
