@@ -1,0 +1,821 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::Value;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+use crate::client::{Client, HealthInfo};
+use crate::config::{Config, CustomList};
+use crate::tables::{self, Category, TableDef};
+
+// ── Enums ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BaseView {
+    TableBrowser,
+    AllTablesBrowser,
+    RecordList,
+    RecordDetail,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Overlay {
+    ScriptRunner,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputMode {
+    Normal,
+    Filter,
+    Command,
+    Script,
+}
+
+// ── Background messages ───────────────────────────────────────────────────────
+
+pub enum AppMsg {
+    HealthUpdate(HealthInfo),
+    RecordsLoaded { table: String, records: Vec<Value> },
+    RecordLoaded { record: Value },
+    AllTablesLoaded(Vec<(String, String)>),
+    ScriptResult(Result<String, String>),
+    Error(String),
+}
+
+// ── Browser item list ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum BrowserItem {
+    Header(String),
+    CustomList { name: String, table: String, query: String, order: String },
+    Table { name: String, label: String },
+    BrowseAll,
+}
+
+impl BrowserItem {
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, BrowserItem::Header(_))
+    }
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
+pub struct App {
+    pub client: Arc<Client>,
+    pub health: HealthInfo,
+    last_health: Instant,
+
+    // navigation
+    pub base_view: BaseView,
+    view_stack: Vec<BaseView>,
+    pub overlay: Option<Overlay>,
+    pub mode: InputMode,
+    pub should_quit: bool,
+
+    // table browser
+    pub categories: Vec<Category>,
+    pub browser_items: Vec<BrowserItem>,
+    pub browser_cursor: usize,
+
+    // all-tables browser
+    pub all_tables: Vec<(String, String)>,
+    pub all_tables_cursor: usize,
+    pub all_tables_loading: bool,
+    pub all_tables_filter: String,
+
+    // record list
+    pub current_table: String,
+    pub current_table_def: Option<TableDef>,
+    pub record_list_title: String,  // display name (table label or custom list name)
+    pub records: Vec<Value>,
+    pub record_cursor: usize,
+    pub record_scroll: usize,
+    pub records_loading: bool,
+    pub record_filter: String,
+
+    // input buffers
+    pub filter_buf: String,
+    pub command_buf: String,
+
+    // record detail
+    pub detail_record: Option<Value>,
+    pub detail_table: String,
+    pub detail_sys_id: String,
+    pub detail_scroll: usize,
+    pub detail_loading: bool,
+
+    // script runner
+    pub script_buf: String,
+    pub script_cursor: usize,
+    pub script_output: Vec<String>,
+    pub script_running: bool,
+    pub script_out_scroll: usize,
+
+    // status bar
+    pub status: Option<String>,
+    pub status_is_error: bool,
+
+    // channels
+    pub msg_tx: UnboundedSender<AppMsg>,
+    msg_rx: UnboundedReceiver<AppMsg>,
+}
+
+impl App {
+    pub fn new(port: u16, cfg: Config) -> Self {
+        let (msg_tx, msg_rx) = unbounded_channel();
+        let categories = tables::make_categories();
+        let browser_items = build_browser_items(&categories, &cfg.lists);
+        let browser_cursor = first_selectable(&browser_items, 0);
+
+        Self {
+            client: Arc::new(Client::new(port)),
+            health: HealthInfo::default(),
+            last_health: Instant::now() - Duration::from_secs(10),
+
+            base_view: BaseView::TableBrowser,
+            view_stack: Vec::new(),
+            overlay: None,
+            mode: InputMode::Normal,
+            should_quit: false,
+
+            categories,
+            browser_items,
+            browser_cursor,
+
+            all_tables: Vec::new(),
+            all_tables_cursor: 0,
+            all_tables_loading: false,
+            all_tables_filter: String::new(),
+
+            current_table: String::new(),
+            current_table_def: None,
+            record_list_title: String::new(),
+            records: Vec::new(),
+            record_cursor: 0,
+            record_scroll: 0,
+            records_loading: false,
+            record_filter: String::new(),
+
+            filter_buf: String::new(),
+            command_buf: String::new(),
+
+            detail_record: None,
+            detail_table: String::new(),
+            detail_sys_id: String::new(),
+            detail_scroll: 0,
+            detail_loading: false,
+
+            script_buf: String::new(),
+            script_cursor: 0,
+            script_output: Vec::new(),
+            script_running: false,
+            script_out_scroll: 0,
+
+            status: None,
+            status_is_error: false,
+
+            msg_tx,
+            msg_rx,
+        }
+    }
+
+    // ── Data loading ──────────────────────────────────────────────────────────
+
+    pub async fn initial_health_check(&mut self) {
+        self.spawn_health_check();
+    }
+
+    fn spawn_health_check(&self) {
+        let client = self.client.clone();
+        let tx = self.msg_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(h) = client.health().await {
+                let _ = tx.send(AppMsg::HealthUpdate(h));
+            }
+        });
+    }
+
+    fn load_records(&mut self, table: String, query: String, order: String) {
+        let base = self
+            .current_table_def
+            .as_ref()
+            .map(|t| t.fields.clone())
+            .unwrap_or_else(|| "name,sys_updated_on".into());
+        // sys_id is never in the display columns but is needed for drill-down
+        let fields = if base.split(',').any(|f| f.trim() == "sys_id") {
+            base
+        } else {
+            format!("sys_id,{base}")
+        };
+        let client = self.client.clone();
+        let tx = self.msg_tx.clone();
+        self.records_loading = true;
+        self.records.clear();
+        self.record_cursor = 0;
+        self.record_scroll = 0;
+        tokio::spawn(async move {
+            match client.list_records(&table, &fields, &query, 100, &order).await {
+                Ok(records) => {
+                    let _ = tx.send(AppMsg::RecordsLoaded { table, records });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMsg::Error(e));
+                }
+            }
+        });
+    }
+
+    fn load_detail(&mut self, table: String, sys_id: String) {
+        let client = self.client.clone();
+        let tx = self.msg_tx.clone();
+        self.detail_loading = true;
+        self.detail_record = None;
+        tokio::spawn(async move {
+            match client.get_record(&table, &sys_id).await {
+                Ok(record) => {
+                    let _ = tx.send(AppMsg::RecordLoaded { record });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMsg::Error(e));
+                }
+            }
+        });
+    }
+
+    fn spawn_run_script(&mut self) {
+        let script = self.script_buf.trim().to_string();
+        if script.is_empty() {
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.msg_tx.clone();
+        self.script_running = true;
+        self.script_output.push(">>> running...".into());
+        self.script_out_scroll = self.script_output.len().saturating_sub(1);
+        tokio::spawn(async move {
+            let result = client.run_script(&script).await;
+            let _ = tx.send(AppMsg::ScriptResult(result));
+        });
+    }
+
+    fn load_all_tables(&mut self, filter: String) {
+        let client = self.client.clone();
+        let tx = self.msg_tx.clone();
+        self.all_tables_loading = true;
+        self.all_tables.clear();
+        tokio::spawn(async move {
+            match client.list_all_tables(&filter).await {
+                Ok(tables) => {
+                    let _ = tx.send(AppMsg::AllTablesLoaded(tables));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMsg::Error(e));
+                }
+            }
+        });
+    }
+
+    // ── Message processing ────────────────────────────────────────────────────
+
+    pub fn process_messages(&mut self) {
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.handle_msg(msg);
+        }
+    }
+
+    fn handle_msg(&mut self, msg: AppMsg) {
+        match msg {
+            AppMsg::HealthUpdate(h) => {
+                self.health = h;
+            }
+            AppMsg::RecordsLoaded { table, records } => {
+                if table == self.current_table {
+                    self.records = records;
+                    self.records_loading = false;
+                    self.record_cursor = 0;
+                    self.record_scroll = 0;
+                }
+            }
+            AppMsg::RecordLoaded { record } => {
+                self.detail_record = Some(record);
+                self.detail_loading = false;
+                self.detail_scroll = 0;
+            }
+            AppMsg::AllTablesLoaded(tables) => {
+                self.all_tables = tables;
+                self.all_tables_loading = false;
+                self.all_tables_cursor = 0;
+            }
+            AppMsg::ScriptResult(result) => {
+                self.script_running = false;
+                match result {
+                    Ok(output) => {
+                        for line in output.lines() {
+                            self.script_output.push(line.to_string());
+                        }
+                        if output.trim().is_empty() {
+                            self.script_output.push("(no output)".into());
+                        }
+                    }
+                    Err(e) => {
+                        self.script_output.push(format!("ERROR: {e}"));
+                    }
+                }
+                self.script_out_scroll = self.script_output.len().saturating_sub(1);
+            }
+            AppMsg::Error(e) => {
+                self.records_loading = false;
+                self.detail_loading = false;
+                self.all_tables_loading = false;
+                self.status = Some(e);
+                self.status_is_error = true;
+            }
+        }
+    }
+
+    // ── Periodic tick ─────────────────────────────────────────────────────────
+
+    pub async fn tick(&mut self) {
+        if self.last_health.elapsed() > Duration::from_secs(5) {
+            self.last_health = Instant::now();
+            self.spawn_health_check();
+        }
+    }
+
+    // ── Navigation ────────────────────────────────────────────────────────────
+
+    fn push_view(&mut self, view: BaseView) {
+        let prev = std::mem::replace(&mut self.base_view, view);
+        self.view_stack.push(prev);
+    }
+
+    fn pop_view(&mut self) {
+        if let Some(prev) = self.view_stack.pop() {
+            self.base_view = prev;
+        }
+    }
+
+    fn open_table(&mut self, name: &str) {
+        self.current_table = name.to_string();
+        self.current_table_def = tables::find_table(&self.categories, name);
+        self.record_list_title = self
+            .current_table_def
+            .as_ref()
+            .map(|t| t.label.clone())
+            .unwrap_or_else(|| name.to_string());
+        let query = self
+            .current_table_def
+            .as_ref()
+            .map(|t| t.default_query.clone())
+            .unwrap_or_default();
+        let order = self
+            .current_table_def
+            .as_ref()
+            .map(|t| t.default_order.clone())
+            .unwrap_or_default();
+        self.record_filter = query.clone();
+        self.push_view(BaseView::RecordList);
+        self.load_records(name.to_string(), query, order);
+    }
+
+    fn open_custom_list(&mut self, name: String, table: String, query: String, order: String) {
+        self.current_table = table.clone();
+        self.current_table_def = tables::find_table(&self.categories, &table);
+        self.record_list_title = name;
+        self.record_filter = query.clone();
+        let effective_order = if order.is_empty() {
+            self.current_table_def
+                .as_ref()
+                .map(|t| t.default_order.clone())
+                .unwrap_or_default()
+        } else {
+            order
+        };
+        self.push_view(BaseView::RecordList);
+        self.load_records(table, query, effective_order);
+    }
+
+    fn open_detail(&mut self) {
+        if self.records.is_empty() {
+            return;
+        }
+        let rec = &self.records[self.record_cursor];
+        let sys_id = extract_sys_id(rec).unwrap_or_default();
+        if sys_id.is_empty() {
+            return;
+        }
+        let table = self.current_table.clone();
+        self.detail_table = table.clone();
+        self.detail_sys_id = sys_id.clone();
+        self.push_view(BaseView::RecordDetail);
+        self.load_detail(table, sys_id);
+    }
+
+    fn browser_down(&mut self) {
+        let len = self.browser_items.len();
+        let mut i = self.browser_cursor + 1;
+        while i < len {
+            if self.browser_items[i].is_selectable() {
+                self.browser_cursor = i;
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    fn browser_up(&mut self) {
+        if self.browser_cursor == 0 {
+            return;
+        }
+        let mut i = self.browser_cursor - 1;
+        loop {
+            if self.browser_items[i].is_selectable() {
+                self.browser_cursor = i;
+                return;
+            }
+            if i == 0 {
+                return;
+            }
+            i -= 1;
+        }
+    }
+
+    // ── Key handling ──────────────────────────────────────────────────────────
+
+    /// Returns true if the app should quit.
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+            return true;
+        }
+        match self.mode {
+            InputMode::Normal => self.handle_normal(key),
+            InputMode::Filter => self.handle_filter_key(key),
+            InputMode::Command => self.handle_command_key(key),
+            InputMode::Script => self.handle_script_key(key),
+        }
+        self.should_quit
+    }
+
+    fn handle_normal(&mut self, key: KeyEvent) {
+        if self.overlay.is_some() {
+            self.handle_overlay_key(key);
+            return;
+        }
+        match self.base_view.clone() {
+            BaseView::TableBrowser => self.handle_browser(key),
+            BaseView::AllTablesBrowser => self.handle_all_tables(key),
+            BaseView::RecordList => self.handle_record_list(key),
+            BaseView::RecordDetail => self.handle_detail(key),
+        }
+    }
+
+    fn handle_overlay_key(&mut self, key: KeyEvent) {
+        let ov = self.overlay.clone().unwrap();
+        match ov {
+            Overlay::Help => {
+                self.overlay = None;
+            }
+            Overlay::ScriptRunner => match key.code {
+                KeyCode::Esc => {
+                    self.overlay = None;
+                }
+                KeyCode::Char('i') => {
+                    self.mode = InputMode::Script;
+                }
+                KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.spawn_run_script();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.script_out_scroll = self.script_out_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = self.script_output.len().saturating_sub(1);
+                    self.script_out_scroll = (self.script_out_scroll + 1).min(max);
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn handle_browser(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('?') => {
+                self.overlay = Some(Overlay::Help);
+            }
+            KeyCode::Char('s') => {
+                self.overlay = Some(Overlay::ScriptRunner);
+            }
+            KeyCode::Char(':') => {
+                self.mode = InputMode::Command;
+                self.command_buf.clear();
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.browser_down(),
+            KeyCode::Up | KeyCode::Char('k') => self.browser_up(),
+            KeyCode::Char('g') => {
+                self.browser_cursor = first_selectable(&self.browser_items, 0);
+            }
+            KeyCode::Char('G') => {
+                let len = self.browser_items.len();
+                if len > 0 {
+                    self.browser_cursor = last_selectable(&self.browser_items);
+                }
+            }
+            KeyCode::Enter => {
+                let item = self.browser_items.get(self.browser_cursor).cloned();
+                match item {
+                    Some(BrowserItem::Table { name, .. }) => self.open_table(&name),
+                    Some(BrowserItem::CustomList { name, table, query, order }) => {
+                        self.open_custom_list(name, table, query, order);
+                    }
+                    Some(BrowserItem::BrowseAll) => {
+                        self.push_view(BaseView::AllTablesBrowser);
+                        self.load_all_tables(String::new());
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_all_tables(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.pop_view(),
+            KeyCode::Char('?') => {
+                self.overlay = Some(Overlay::Help);
+            }
+            KeyCode::Char('s') => {
+                self.overlay = Some(Overlay::ScriptRunner);
+            }
+            KeyCode::Char('/') => {
+                self.mode = InputMode::Filter;
+                self.filter_buf = self.all_tables_filter.clone();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = self.all_tables.len().saturating_sub(1);
+                self.all_tables_cursor = (self.all_tables_cursor + 1).min(max);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.all_tables_cursor = self.all_tables_cursor.saturating_sub(1);
+            }
+            KeyCode::Char('g') => self.all_tables_cursor = 0,
+            KeyCode::Char('G') => {
+                self.all_tables_cursor = self.all_tables.len().saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some((name, _)) = self.all_tables.get(self.all_tables_cursor).cloned() {
+                    self.open_table(&name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_record_list(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.pop_view(),
+            KeyCode::Char('?') => {
+                self.overlay = Some(Overlay::Help);
+            }
+            KeyCode::Char('s') => {
+                self.overlay = Some(Overlay::ScriptRunner);
+            }
+            KeyCode::Char('r') => {
+                let query = self.record_filter.clone();
+                let order = self
+                    .current_table_def
+                    .as_ref()
+                    .map(|t| t.default_order.clone())
+                    .unwrap_or_default();
+                let table = self.current_table.clone();
+                self.load_records(table, query, order);
+            }
+            KeyCode::Char('/') => {
+                self.mode = InputMode::Filter;
+                self.filter_buf = self.record_filter.clone();
+            }
+            KeyCode::Char(':') => {
+                self.mode = InputMode::Command;
+                self.command_buf.clear();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = self.records.len().saturating_sub(1);
+                self.record_cursor = (self.record_cursor + 1).min(max);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.record_cursor = self.record_cursor.saturating_sub(1);
+            }
+            KeyCode::Char('g') => self.record_cursor = 0,
+            KeyCode::Char('G') => {
+                self.record_cursor = self.records.len().saturating_sub(1);
+            }
+            KeyCode::Enter | KeyCode::Char('d') => self.open_detail(),
+            _ => {}
+        }
+    }
+
+    fn handle_detail(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.pop_view(),
+            KeyCode::Char('?') => {
+                self.overlay = Some(Overlay::Help);
+            }
+            KeyCode::Char('s') => {
+                self.overlay = Some(Overlay::ScriptRunner);
+            }
+            KeyCode::Char('r') => {
+                let table = self.detail_table.clone();
+                let sys_id = self.detail_sys_id.clone();
+                self.load_detail(table, sys_id);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.detail_scroll = self.detail_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(20);
+            }
+            KeyCode::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(20);
+            }
+            KeyCode::Char('g') => self.detail_scroll = 0,
+            KeyCode::Char('G') => self.detail_scroll = 9999,
+            _ => {}
+        }
+    }
+
+    fn handle_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.filter_buf.clear();
+            }
+            KeyCode::Enter => {
+                let query = self.filter_buf.clone();
+                self.mode = InputMode::Normal;
+                self.filter_buf.clear();
+                match self.base_view {
+                    BaseView::RecordList => {
+                        self.record_filter = query.clone();
+                        let order = self
+                            .current_table_def
+                            .as_ref()
+                            .map(|t| t.default_order.clone())
+                            .unwrap_or_default();
+                        let table = self.current_table.clone();
+                        self.load_records(table, query, order);
+                    }
+                    BaseView::AllTablesBrowser => {
+                        self.all_tables_filter = query.clone();
+                        self.load_all_tables(query);
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Backspace => {
+                self.filter_buf.pop();
+            }
+            KeyCode::Char(c) => {
+                self.filter_buf.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_command_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.command_buf.clear();
+            }
+            KeyCode::Enter => {
+                let cmd = self.command_buf.trim().to_string();
+                self.mode = InputMode::Normal;
+                self.command_buf.clear();
+                self.execute_command(&cmd);
+            }
+            KeyCode::Backspace => {
+                self.command_buf.pop();
+            }
+            KeyCode::Char(c) => {
+                self.command_buf.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn execute_command(&mut self, cmd: &str) {
+        match cmd.trim() {
+            "" => {}
+            "q" | "quit" => self.should_quit = true,
+            table => self.open_table(table),
+        }
+    }
+
+    fn handle_script_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
+                self.mode = InputMode::Normal;
+                self.spawn_run_script();
+            }
+            KeyCode::Enter => {
+                let pos = self.script_cursor;
+                self.script_buf.insert(pos, '\n');
+                self.script_cursor = pos + 1;
+            }
+            KeyCode::Backspace => {
+                if self.script_cursor > 0 {
+                    let pos = self.script_cursor - 1;
+                    self.script_buf.remove(pos);
+                    self.script_cursor = pos;
+                }
+            }
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
+                self.mode = InputMode::Normal;
+                self.spawn_run_script();
+            }
+            KeyCode::F(5) => {
+                self.mode = InputMode::Normal;
+                self.spawn_run_script();
+            }
+            KeyCode::Char(c) => {
+                let pos = self.script_cursor;
+                self.script_buf.insert(pos, c);
+                self.script_cursor = pos + 1;
+            }
+            KeyCode::Left => {
+                self.script_cursor = self.script_cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                self.script_cursor = (self.script_cursor + 1).min(self.script_buf.len());
+            }
+            _ => {}
+        }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn build_browser_items(categories: &[Category], custom_lists: &[CustomList]) -> Vec<BrowserItem> {
+    let mut items = Vec::new();
+
+    if !custom_lists.is_empty() {
+        items.push(BrowserItem::Header("MY LISTS".to_string()));
+        for list in custom_lists {
+            items.push(BrowserItem::CustomList {
+                name: list.name.clone(),
+                table: list.table.clone(),
+                query: list.query.clone(),
+                order: list.order.clone(),
+            });
+        }
+        items.push(BrowserItem::Header(String::new())); // separator
+    }
+
+    for cat in categories {
+        items.push(BrowserItem::Header(cat.name.to_string()));
+        for t in &cat.tables {
+            items.push(BrowserItem::Table { name: t.name.clone(), label: t.label.clone() });
+        }
+    }
+    items.push(BrowserItem::Header(String::new()));
+    items.push(BrowserItem::BrowseAll);
+    items
+}
+
+fn first_selectable(items: &[BrowserItem], from: usize) -> usize {
+    for (i, item) in items.iter().enumerate().skip(from) {
+        if item.is_selectable() {
+            return i;
+        }
+    }
+    from
+}
+
+fn last_selectable(items: &[BrowserItem]) -> usize {
+    for (i, item) in items.iter().enumerate().rev() {
+        if item.is_selectable() {
+            return i;
+        }
+    }
+    0
+}
+
+fn extract_sys_id(record: &Value) -> Option<String> {
+    let v = record.get("sys_id")?;
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(m) => m.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        _ => None,
+    }
+}

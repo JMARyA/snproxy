@@ -1,0 +1,76 @@
+[snproxy]
+port = 8766
+
+# ── My work ───────────────────────────────────────────────────────────────────
+# gs.getUserID() resolves to the currently logged-in user at query time.
+
+[[lists]]
+name = "My Work"
+table = "task"
+# All active tasks assigned to me, across every task type
+query = "assigned_to=javascript:gs.getUserID()^active=true^state!=3^state!=4"
+order = "ORDERBYDESCsys_updated_on"
+
+[[lists]]
+name = "My Incidents"
+table = "incident"
+query = "assigned_to=javascript:gs.getUserID()^active=true"
+order = "ORDERBYDESCsys_updated_on"
+
+[[lists]]
+name = "My Changes"
+table = "change_request"
+query = "assigned_to=javascript:gs.getUserID()^active=true"
+order = "ORDERBYDESCsys_updated_on"
+
+[[lists]]
+name = "My Approvals"
+table = "sysapproval_approver"
+query = "approver=javascript:gs.getUserID()^state=requested"
+order = "ORDERBYDESCsys_updated_on"
+
+[[lists]]
+name = "My Requests"
+table = "sc_request"
+query = "opened_by=javascript:gs.getUserID()^active=true"
+order = "ORDERBYDESCsys_updated_on"
+
+[[lists]]
+name = "My Request Tasks"
+table = "sc_task"
+query = "assigned_to=javascript:gs.getUserID()^active=true"
+order = "ORDERBYDESCsys_updated_on"
+
+# ── Watch ─────────────────────────────────────────────────────────────────────
+
+[[lists]]
+name = "Unassigned P1/P2"
+table = "incident"
+query = "priority<=2^assigned_toISEMPTY^active=true"
+order = "ORDERBYpriority^ORDERBYDESCsys_created_on"
+
+[[lists]]
+name = "Open Changes"
+table = "change_request"
+query = "state=implement^active=true"
+order = "ORDERBYstart_date"
+
+# ── Agile / development ───────────────────────────────────────────────────────
+
+[[lists]]
+name = "My Stories"
+table = "rm_story"
+query = "assigned_to=javascript:gs.getUserID()^active=true"
+order = "ORDERBYDESCsys_updated_on"
+
+[[lists]]
+name = "My Defects"
+table = "rm_defect"
+query = "assigned_to=javascript:gs.getUserID()^active=true"
+order = "ORDERBYDESCsys_updated_on"
+
+# [[lists]]
+# name = "Sprint Backlog"
+# table = "rm_story"
+# query = "sprint.state=active^state!=complete^state!=cancelled"
+# order = "ORDERBYstory_points"

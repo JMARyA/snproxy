@@ -1,5 +1,5 @@
 [workspace]
-members = ["sncli", "snstate"]
+members = ["sncli", "snstate", "sncore", "sntui"]
 resolver = "2"
 
 [package]
@@ -12,6 +12,7 @@ name = "snproxy"
 path = "src/main.rs"
 
 [dependencies]
+sncore           = { path = "sncore" }
 axum             = { version = "0.7", features = ["macros"] }
 tokio            = { version = "1",   features = ["full"] }
 tokio-tungstenite = "0.23"

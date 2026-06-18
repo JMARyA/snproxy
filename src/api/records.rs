@@ -5,6 +5,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use sncore::SnTableMeta;
+
 use crate::state::{check_rest_response, AppError, AppState};
 use crate::ws_protocol::WsCommand;
 
@@ -235,16 +237,20 @@ pub async fn schema(
         table_name: table.clone(),
     }).await?;
 
-    // The extension fetches /api/now/ui/meta/:table and wraps the response in
-    // resp.result.  Fields are an object keyed by field name, not an array.
-    let fields = resp
-        .get("result")
-        .and_then(|r| r.get("fields"))
-        .cloned()
-        .unwrap_or(json!({}));
+    // The extension fetches /api/now/ui/meta/:table and sends back result verbatim.
+    // Deserialize into SnTableMeta so callers get typed column metadata.
+    let result = resp.get("result").cloned().ok_or_else(|| {
+        tracing::warn!("requestTableStructure response had no 'result' key; full resp: {resp}");
+        AppError::Remote("requestTableStructure returned no result".into())
+    })?;
+    let meta: SnTableMeta = serde_json::from_value(result.clone()).map_err(|e| {
+        tracing::warn!("SnTableMeta deserialize failed ({e}); result: {result}");
+        AppError::Remote(format!("schema parse error: {e}"))
+    })?;
 
     Ok(Json(json!({
-        "table":  table,
-        "fields": fields,
+        "table":   table,
+        "label":   meta.label,
+        "columns": meta.columns,
     })))
 }

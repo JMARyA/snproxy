@@ -34,11 +34,20 @@
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "snstate" ];
         };
+
+        sntui = pkgs.rustPlatform.buildRustPackage {
+          pname = "sntui";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "sntui" ];
+        };
       in
       {
         packages.snproxy  = snproxy;
         packages.sncli    = sncli;
         packages.snstate  = snstate;
+        packages.sntui    = sntui;
         packages.default  = snproxy;
 
         devShells.default = pkgs.mkShell {
@@ -61,6 +70,7 @@
             echo "  nix build .#snproxy   # reproducible build"
             echo "  nix build .#sncli"
             echo "  nix build .#snstate"
+            echo "  nix build .#sntui"
           '';
         };
       }
@@ -75,6 +85,7 @@
           snproxy = self.packages.${pkgs.system}.snproxy;
           sncli   = self.packages.${pkgs.system}.sncli;
           snstate = self.packages.${pkgs.system}.snstate;
+          sntui   = self.packages.${pkgs.system}.sntui;
         in
         {
           options.services.snproxy = {
@@ -118,7 +129,7 @@
           };
 
           config = lib.mkIf cfg.enable {
-            environment.systemPackages = [ snproxy sncli snstate ];
+            environment.systemPackages = [ snproxy sncli snstate sntui ];
 
             systemd.services.snproxy = {
               description = "snproxy — ServiceNow REST proxy via SN Utils WebSocket";

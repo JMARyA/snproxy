@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 pub async fn serve(state: AppState, host: String, port: u16) {
     let addr = format!("{host}:{port}");
@@ -67,6 +67,7 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 debug!(%action, %req_id, "→ WS send");
+                trace!("→ WS payload: {msg}");
             }
             if sink.send(Message::Text(msg)).await.is_err() {
                 break;
@@ -77,7 +78,9 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
     // Route inbound messages (Helper Tab → pending callers + SSE broadcast)
     while let Some(result) = ws_stream.next().await {
         match result {
-            Ok(Message::Text(text)) => match serde_json::from_str::<Value>(&text) {
+            Ok(Message::Text(text)) => {
+                trace!("← WS payload: {text}");
+                match serde_json::from_str::<Value>(&text) {
                 Ok(val) => {
                     let action = val
                         .get("action")
@@ -130,7 +133,8 @@ async fn handle_client(stream: tokio::net::TcpStream, peer: String, state: AppSt
                     warn!("← WS recv non-JSON ({e}): {}", &text[..text.len().min(120)]);
                     let _ = state.event_tx.send(json!({"raw": text.as_str()}));
                 }
-            },
+                }
+            }
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {} // Ping/Pong handled automatically by tungstenite
         }
