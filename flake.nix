@@ -26,11 +26,20 @@
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "sncli" ];
         };
+
+        snstate = pkgs.rustPlatform.buildRustPackage {
+          pname = "snstate";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "snstate" ];
+        };
       in
       {
-        packages.snproxy = snproxy;
-        packages.sncli   = sncli;
-        packages.default = snproxy;
+        packages.snproxy  = snproxy;
+        packages.sncli    = sncli;
+        packages.snstate  = snstate;
+        packages.default  = snproxy;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -49,8 +58,9 @@
             echo "  cargo build --release"
             echo "  cargo check"
             echo ""
-            echo "  nix build          # reproducible build"
-            echo "  ./result/bin/snproxy --help"
+            echo "  nix build .#snproxy   # reproducible build"
+            echo "  nix build .#sncli"
+            echo "  nix build .#snstate"
           '';
         };
       }
@@ -61,9 +71,10 @@
     {
       nixosModules.default = { config, lib, pkgs, ... }:
         let
-          cfg = config.services.snproxy;
+          cfg     = config.services.snproxy;
           snproxy = self.packages.${pkgs.system}.snproxy;
           sncli   = self.packages.${pkgs.system}.sncli;
+          snstate = self.packages.${pkgs.system}.snstate;
         in
         {
           options.services.snproxy = {
@@ -107,7 +118,7 @@
           };
 
           config = lib.mkIf cfg.enable {
-            environment.systemPackages = [ snproxy sncli ];
+            environment.systemPackages = [ snproxy sncli snstate ];
 
             systemd.services.snproxy = {
               description = "snproxy — ServiceNow REST proxy via SN Utils WebSocket";
