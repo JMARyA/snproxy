@@ -226,6 +226,30 @@ pub fn find_table(categories: &[Category], name: &str) -> Option<TableDef> {
     None
 }
 
+/// Priority fields shown first in detail view, in this order.
+pub const DETAIL_PRIORITY: &[&str] = &[
+    "number", "sys_id", "short_description", "description",
+    "state", "priority", "assigned_to", "opened_by",
+    "sys_created_on", "sys_updated_on",
+];
+
+/// Returns the ordered field key list for a record's detail view.
+pub fn detail_field_order(obj: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut keys: Vec<String> = DETAIL_PRIORITY
+        .iter()
+        .filter(|&&k| obj.contains_key(k))
+        .map(|&k| k.to_string())
+        .collect();
+    let mut rest: Vec<String> = obj
+        .keys()
+        .filter(|k| !DETAIL_PRIORITY.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    rest.sort();
+    keys.extend(rest);
+    keys
+}
+
 pub fn display_value(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),

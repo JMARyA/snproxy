@@ -107,11 +107,12 @@ impl Client {
         Ok(j["records"].as_array().cloned().unwrap_or_default())
     }
 
-    pub async fn get_record(&self, table: &str, sys_id: &str) -> Result<Value, String> {
+    /// `display_value`: "false" (raw sys_ids), "true" (display strings), "all" (both as {value, display_value})
+    pub async fn get_record(&self, table: &str, sys_id: &str, display_value: &str) -> Result<Value, String> {
         let resp = self
             .http
             .get(format!("{}/records/{table}/{sys_id}", self.base_url))
-            .query(&[("instance", "auto")])
+            .query(&[("instance", "auto"), ("display_value", display_value)])
             .send()
             .await
             .map_err(|e| e.to_string())?;

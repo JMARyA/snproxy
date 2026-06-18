@@ -108,10 +108,13 @@ pub struct App {
 
     // record detail
     pub detail_record: Option<Value>,
+    pub detail_field_keys: Vec<String>,   // ordered field names for current detail record
     pub detail_table: String,
     pub detail_sys_id: String,
-    pub detail_scroll: usize,
+    pub detail_field_cursor: usize,
     pub detail_loading: bool,
+    /// Stack of (table, sys_id) for Esc-back when following references
+    pub detail_history: Vec<(String, String)>,
 
     // script runner
     pub script_buf: String,
@@ -171,10 +174,12 @@ impl App {
             command_buf: String::new(),
 
             detail_record: None,
+            detail_field_keys: Vec::new(),
             detail_table: String::new(),
             detail_sys_id: String::new(),
-            detail_scroll: 0,
+            detail_field_cursor: 0,
             detail_loading: false,
+            detail_history: Vec::new(),
 
             script_buf: String::new(),
             script_cursor: 0,
@@ -262,8 +267,9 @@ impl App {
         let tx = self.msg_tx.clone();
         self.detail_loading = true;
         self.detail_record = None;
+        self.detail_field_cursor = 0;
         tokio::spawn(async move {
-            match client.get_record(&table, &sys_id).await {
+            match client.get_record(&table, &sys_id, "all").await {
                 Ok(record) => {
                     let _ = tx.send(AppMsg::RecordLoaded { record });
                 }
@@ -272,6 +278,16 @@ impl App {
                 }
             }
         });
+    }
+
+    fn open_reference(&mut self, ref_table: String, ref_sys_id: String) {
+        // push current position so Esc can return
+        self.detail_history.push((self.detail_table.clone(), self.detail_sys_id.clone()));
+        self.detail_table = ref_table.clone();
+        self.detail_sys_id = ref_sys_id.clone();
+        // load schema for the referenced table if not already cached
+        self.load_schema(ref_table.clone());
+        self.load_detail(ref_table, ref_sys_id);
     }
 
     fn spawn_run_script(&mut self) {
@@ -329,9 +345,13 @@ impl App {
                 }
             }
             AppMsg::RecordLoaded { record } => {
+                self.detail_field_keys = record
+                    .as_object()
+                    .map(|obj| tables::detail_field_order(obj))
+                    .unwrap_or_default();
                 self.detail_record = Some(record);
                 self.detail_loading = false;
-                self.detail_scroll = 0;
+                self.detail_field_cursor = 0;
             }
             AppMsg::AllTablesLoaded(tables) => {
                 self.all_tables = tables;
@@ -659,33 +679,68 @@ impl App {
     }
 
     fn handle_detail(&mut self, key: KeyEvent) {
+        let n = self.detail_field_keys.len();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.pop_view(),
-            KeyCode::Char('?') => {
-                self.overlay = Some(Overlay::Help);
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if let Some((table, sys_id)) = self.detail_history.pop() {
+                    // go back to previous record in the reference chain
+                    self.detail_table = table.clone();
+                    self.detail_sys_id = sys_id.clone();
+                    self.load_schema(table.clone());
+                    self.load_detail(table, sys_id);
+                } else {
+                    self.pop_view();
+                }
             }
-            KeyCode::Char('s') => {
-                self.overlay = Some(Overlay::ScriptRunner);
+            KeyCode::Enter => {
+                // follow a reference field if schema tells us it's a ref
+                if let Some(field) = self.detail_field_keys.get(self.detail_field_cursor) {
+                    let is_ref = self.current_schema
+                        .as_ref()
+                        .and_then(|s| s.columns.get(field))
+                        .map(|c| c.is_reference() && !c.reference.is_empty())
+                        .unwrap_or(false);
+                    if is_ref {
+                        let ref_table = self.current_schema
+                            .as_ref()
+                            .and_then(|s| s.columns.get(field))
+                            .map(|c| c.reference.clone())
+                            .unwrap_or_default();
+                        // raw sys_id lives in record[field]["value"] (display_value=all response)
+                        let ref_sys_id = self.detail_record
+                            .as_ref()
+                            .and_then(|r| r.get(field))
+                            .and_then(|v| v.get("value").or(Some(v)))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if !ref_table.is_empty() && !ref_sys_id.is_empty() {
+                            self.open_reference(ref_table, ref_sys_id);
+                        }
+                    }
+                }
             }
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('s') => self.overlay = Some(Overlay::ScriptRunner),
             KeyCode::Char('r') => {
                 let table = self.detail_table.clone();
                 let sys_id = self.detail_sys_id.clone();
                 self.load_detail(table, sys_id);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.detail_scroll = self.detail_scroll.saturating_add(1);
+                if n > 0 { self.detail_field_cursor = (self.detail_field_cursor + 1).min(n - 1); }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                self.detail_field_cursor = self.detail_field_cursor.saturating_sub(1);
             }
             KeyCode::PageDown => {
-                self.detail_scroll = self.detail_scroll.saturating_add(20);
+                if n > 0 { self.detail_field_cursor = (self.detail_field_cursor + 20).min(n - 1); }
             }
             KeyCode::PageUp => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(20);
+                self.detail_field_cursor = self.detail_field_cursor.saturating_sub(20);
             }
-            KeyCode::Char('g') => self.detail_scroll = 0,
-            KeyCode::Char('G') => self.detail_scroll = 9999,
+            KeyCode::Char('g') => self.detail_field_cursor = 0,
+            KeyCode::Char('G') => { if n > 0 { self.detail_field_cursor = n - 1; } }
             _ => {}
         }
     }

@@ -28,7 +28,12 @@ pub struct ListParams {
     /// Appended to the query as an ORDER BY clause, e.g. "ORDERBYname"
     #[serde(default)]
     pub order_by: String,
+    /// "false" (default) | "true" | "all"
+    #[serde(default = "default_display_value")]
+    pub display_value: String,
 }
+
+fn default_display_value() -> String { "false".to_string() }
 
 fn default_fields() -> String {
     "sys_id,name,sys_created_on,sys_updated_on".to_string()
@@ -52,6 +57,9 @@ pub async fn list(
     let mut query_string = format!("sysparm_fields={}&sysparm_limit={}", p.fields, p.limit);
     if !sn_query.is_empty() {
         query_string.push_str(&format!("&sysparm_query={sn_query}"));
+    }
+    if p.display_value != "false" {
+        query_string.push_str(&format!("&sysparm_display_value={}", p.display_value));
     }
 
     let instance = s.get_sn_instance().await?;
@@ -84,6 +92,9 @@ pub struct GetParams {
     /// Comma-separated field list; omit for all fields
     #[serde(default)]
     pub fields: String,
+    /// "false" (default) | "true" | "all"
+    #[serde(default = "default_display_value")]
+    pub display_value: String,
 }
 
 pub async fn get(
@@ -91,7 +102,7 @@ pub async fn get(
     Path((table, sys_id)): Path<(String, String)>,
     Query(p): Query<GetParams>,
 ) -> Result<Json<Value>, AppError> {
-    let mut query_params = json!({"sysparm_display_value": "false"});
+    let mut query_params = json!({"sysparm_display_value": p.display_value});
     if !p.fields.is_empty() {
         query_params["sysparm_fields"] = json!(p.fields);
     }

@@ -493,51 +493,74 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    // Priority fields shown first
-    let priority = ["number", "sys_id", "short_description", "description", "state", "priority", "assigned_to", "opened_by", "sys_created_on", "sys_updated_on"];
-    let mut keys: Vec<&str> = priority.iter().filter(|&&k| obj.contains_key(k)).copied().collect();
-    let mut rest: Vec<&str> = obj.keys().map(|s| s.as_str()).filter(|k| !priority.contains(k)).collect();
-    rest.sort();
-    keys.extend(rest);
+    // Use the pre-computed ordered key list from App state (same ordering as handler uses)
+    let keys = &app.detail_field_keys;
 
     let rows: Vec<Row> = keys
         .iter()
-        .map(|&k| {
+        .enumerate()
+        .map(|(i, k)| {
             let val = obj.get(k).map(display_value).unwrap_or_default();
+            let selected = i == app.detail_field_cursor;
 
             let col = app.current_schema.as_ref().and_then(|s| s.columns.get(k));
+            let is_ref = col.map(|c| c.is_reference() && !c.reference.is_empty()).unwrap_or(false);
+
             let key_text = match col {
-                Some(c) if !c.label.is_empty() && c.label != k => {
-                    if c.is_reference() && !c.reference.is_empty() {
+                Some(c) if !c.label.is_empty() && c.label != *k => {
+                    if is_ref {
                         format!("{} →{}", c.label, c.reference)
                     } else {
                         c.label.clone()
                     }
                 }
-                _ => k.to_string(),
+                _ => k.clone(),
             };
+            // selected reference fields show the [↵] hint in the value column
+            let display_val = if selected && is_ref && !val.is_empty() {
+                format!("{val}  [↵ open]")
+            } else {
+                val
+            };
+
             let key_style = if col.map(|c| c.mandatory).unwrap_or(false) {
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(C_ACCENT)
             };
+            let val_style = if is_ref {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
 
-            Row::new(vec![
+            let row = Row::new(vec![
                 Cell::from(key_text).style(key_style),
-                Cell::from(val).style(Style::default().fg(Color::White)),
-            ])
+                Cell::from(display_val).style(val_style),
+            ]);
+            if selected {
+                row.style(Style::default().bg(C_SELECTED_BG))
+            } else {
+                row
+            }
         })
         .collect();
 
-    let title = format!(" {} — {} ", label, app.detail_sys_id);
+    let history_hint = if !app.detail_history.is_empty() {
+        format!(" [Esc: back ×{}]", app.detail_history.len())
+    } else {
+        String::new()
+    };
+    let title = format!(" {} — {}{} ", label, app.detail_sys_id, history_hint);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_DIM));
 
-    let mut state = TableState::default().with_offset(app.detail_scroll);
+    let mut state = TableState::default().with_selected(Some(app.detail_field_cursor));
     let table = Table::new(rows, &[Constraint::Length(28), Constraint::Fill(1)])
-        .block(block);
+        .block(block)
+        .row_highlight_style(Style::default().bg(C_SELECTED_BG));
 
     f.render_stateful_widget(table, area, &mut state);
 }
