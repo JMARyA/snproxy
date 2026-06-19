@@ -8,8 +8,9 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use sncore::{SchemaCache, SnTableMeta};
 
 use crate::client::{Client, HealthInfo};
+use crate::column_config::ColumnConfig;
 use crate::config::{Config, CustomList};
-use crate::tables::{self, Category, TableDef};
+use crate::tables::{self, Category, ColumnDef, TableDef};
 
 // ── Enums ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,16 @@ pub enum BaseView {
 pub enum Overlay {
     ScriptRunner,
     Help,
+    ColumnPicker,
+}
+
+// ── Column picker ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ColPickerEntry {
+    pub field: String,
+    pub label: String,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +63,7 @@ pub enum AppMsg {
 #[derive(Debug, Clone)]
 pub enum BrowserItem {
     Header(String),
-    CustomList { name: String, table: String, query: String, order: String },
+    CustomList { name: String, table: String, query: String, order: String, columns: Vec<String> },
     Table { name: String, label: String },
     BrowseAll,
 }
@@ -123,6 +134,18 @@ pub struct App {
     pub script_running: bool,
     pub script_out_scroll: usize,
 
+    // column config & display options
+    pub column_cfg: ColumnConfig,
+    pub display_names: bool,
+    /// Some(name) when viewing a named custom list; None for plain table views.
+    pub current_list_name: Option<String>,
+    /// Columns specified in the static sntui.toml for the current custom list.
+    current_list_static_columns: Vec<String>,
+
+    // column picker overlay state
+    pub col_picker_fields: Vec<ColPickerEntry>,
+    pub col_picker_cursor: usize,
+
     // status bar
     pub status: Option<String>,
     pub status_is_error: bool,
@@ -187,6 +210,13 @@ impl App {
             script_running: false,
             script_out_scroll: 0,
 
+            column_cfg: crate::column_config::load(),
+            display_names: true,
+            current_list_name: None,
+            current_list_static_columns: Vec::new(),
+            col_picker_fields: Vec::new(),
+            col_picker_cursor: 0,
+
             status: None,
             status_is_error: false,
 
@@ -212,17 +242,7 @@ impl App {
     }
 
     fn load_records(&mut self, table: String, query: String, order: String) {
-        let base = self
-            .current_table_def
-            .as_ref()
-            .map(|t| t.fields.clone())
-            .unwrap_or_else(|| "name,sys_updated_on".into());
-        // sys_id is never in the display columns but is needed for drill-down
-        let fields = if base.split(',').any(|f| f.trim() == "sys_id") {
-            base
-        } else {
-            format!("sys_id,{base}")
-        };
+        let fields = self.effective_fields_param();
         let client = self.client.clone();
         let tx = self.msg_tx.clone();
         self.records_loading = true;
@@ -260,6 +280,170 @@ impl App {
                 Err(_) => {} // non-fatal: UI degrades gracefully without schema
             }
         });
+    }
+
+    // ── Effective columns ─────────────────────────────────────────────────────
+
+    /// Resolves the columns to display for the current table/list view.
+    /// Priority: user-saved list columns > static list columns > user-saved table columns
+    ///           > built-in table def columns > hardcoded fallback.
+    pub fn effective_columns(&self) -> Vec<ColumnDef> {
+        let saved_fields: Option<&Vec<String>> =
+            if let Some(ref name) = self.current_list_name {
+                self.column_cfg.get_list(name)
+                    .or_else(|| {
+                        if !self.current_list_static_columns.is_empty() { None }
+                        else { self.column_cfg.get_table(&self.current_table) }
+                    })
+            } else {
+                self.column_cfg.get_table(&self.current_table)
+            };
+
+        let fields: Option<&Vec<String>> = saved_fields.or_else(|| {
+            if self.current_list_static_columns.is_empty() {
+                None
+            } else {
+                Some(&self.current_list_static_columns)
+            }
+        });
+
+        if let Some(field_list) = fields {
+            let def_map: std::collections::HashMap<&str, &ColumnDef> = self
+                .current_table_def
+                .as_ref()
+                .map(|d| d.columns.iter().map(|c| (c.field.as_str(), c)).collect())
+                .unwrap_or_default();
+            return field_list
+                .iter()
+                .map(|f| {
+                    def_map.get(f.as_str()).copied().cloned().unwrap_or_else(|| ColumnDef {
+                        field: f.clone(),
+                        header: f.clone(),
+                        width: 0,
+                    })
+                })
+                .collect();
+        }
+
+        if let Some(ref def) = self.current_table_def {
+            return def.columns.clone();
+        }
+
+        vec![
+            ColumnDef { field: "sys_id".into(), header: "sys_id".into(), width: 36 },
+            ColumnDef { field: "sys_updated_on".into(), header: "Updated".into(), width: 0 },
+        ]
+    }
+
+    /// Returns the comma-joined field list for the API request, always including sys_id.
+    fn effective_fields_param(&self) -> String {
+        let cols = self.effective_columns();
+        let fields: Vec<&str> = cols.iter().map(|c| c.field.as_str()).collect();
+        if fields.iter().any(|&f| f == "sys_id") {
+            fields.join(",")
+        } else {
+            format!("sys_id,{}", fields.join(","))
+        }
+    }
+
+    // ── Column picker ─────────────────────────────────────────────────────────
+
+    pub fn open_col_picker(&mut self) {
+        let active_fields: Vec<String> =
+            self.effective_columns().into_iter().map(|c| c.field).collect();
+        let active_set: std::collections::HashSet<&str> =
+            active_fields.iter().map(|s| s.as_str()).collect();
+
+        let mut entries: Vec<ColPickerEntry> = active_fields
+            .iter()
+            .map(|f| {
+                let label = self
+                    .current_schema
+                    .as_ref()
+                    .and_then(|s| s.columns.get(f))
+                    .map(|c| c.label.clone())
+                    .unwrap_or_default();
+                ColPickerEntry { field: f.clone(), label, active: true }
+            })
+            .collect();
+
+        if let Some(ref schema) = self.current_schema {
+            let mut inactive: Vec<ColPickerEntry> = schema
+                .columns
+                .iter()
+                .filter(|(f, _)| !active_set.contains(f.as_str()))
+                .map(|(f, c)| ColPickerEntry {
+                    field: f.clone(),
+                    label: c.label.clone(),
+                    active: false,
+                })
+                .collect();
+            inactive.sort_by(|a, b| a.field.cmp(&b.field));
+            entries.extend(inactive);
+        }
+
+        self.col_picker_fields = entries;
+        self.col_picker_cursor = 0;
+        self.overlay = Some(Overlay::ColumnPicker);
+    }
+
+    fn save_col_picker(&mut self) {
+        let active: Vec<String> = self
+            .col_picker_fields
+            .iter()
+            .filter(|e| e.active)
+            .map(|e| e.field.clone())
+            .collect();
+        if active.is_empty() {
+            return;
+        }
+        if let Some(ref name) = self.current_list_name.clone() {
+            self.column_cfg.set_list(name, active);
+        } else {
+            self.column_cfg.set_table(&self.current_table.clone(), active);
+        }
+        crate::column_config::save(&self.column_cfg);
+        let query = self.record_filter.clone();
+        let order = self
+            .current_table_def
+            .as_ref()
+            .map(|t| t.default_order.clone())
+            .unwrap_or_default();
+        let table = self.current_table.clone();
+        self.load_records(table, query, order);
+    }
+
+    /// Re-sorts picker entries: active (in current order) first, then inactive (alpha).
+    pub fn resort_col_picker(&mut self) {
+        let (active, mut inactive): (Vec<_>, Vec<_>) =
+            self.col_picker_fields.drain(..).partition(|e| e.active);
+        inactive.sort_by(|a, b| a.field.cmp(&b.field));
+        self.col_picker_fields = active;
+        self.col_picker_fields.extend(inactive);
+        let max = self.col_picker_fields.len().saturating_sub(1);
+        self.col_picker_cursor = self.col_picker_cursor.min(max);
+    }
+
+    pub fn col_picker_move_up(&mut self) {
+        let i = self.col_picker_cursor;
+        if i > 0
+            && self.col_picker_fields.get(i).map(|e| e.active).unwrap_or(false)
+            && self.col_picker_fields.get(i - 1).map(|e| e.active).unwrap_or(false)
+        {
+            self.col_picker_fields.swap(i, i - 1);
+            self.col_picker_cursor -= 1;
+        }
+    }
+
+    pub fn col_picker_move_down(&mut self) {
+        let i = self.col_picker_cursor;
+        if i + 1 < self.col_picker_fields.len()
+            && self.col_picker_fields.get(i).map(|e| e.active).unwrap_or(false)
+            && self.col_picker_fields.get(i + 1).map(|e| e.active).unwrap_or(false)
+        {
+            self.col_picker_fields.swap(i, i + 1);
+            self.col_picker_cursor += 1;
+        }
     }
 
     fn load_detail(&mut self, table: String, sys_id: String) {
@@ -415,6 +599,8 @@ impl App {
     fn open_table(&mut self, name: &str) {
         self.current_table = name.to_string();
         self.current_table_def = tables::find_table(&self.categories, name);
+        self.current_list_name = None;
+        self.current_list_static_columns = Vec::new();
         self.record_list_title = self
             .current_table_def
             .as_ref()
@@ -437,9 +623,18 @@ impl App {
         self.load_schema(name.to_string());
     }
 
-    fn open_custom_list(&mut self, name: String, table: String, query: String, order: String) {
+    fn open_custom_list(
+        &mut self,
+        name: String,
+        table: String,
+        query: String,
+        order: String,
+        static_columns: Vec<String>,
+    ) {
         self.current_table = table.clone();
         self.current_table_def = tables::find_table(&self.categories, &table);
+        self.current_list_name = Some(name.clone());
+        self.current_list_static_columns = static_columns;
         self.record_list_title = name;
         self.record_filter = query.clone();
         let effective_order = if order.is_empty() {
@@ -555,6 +750,31 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::ColumnPicker => match key.code {
+                KeyCode::Esc => {
+                    self.save_col_picker();
+                    self.overlay = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.col_picker_cursor = self.col_picker_cursor.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = self.col_picker_fields.len().saturating_sub(1);
+                    self.col_picker_cursor = (self.col_picker_cursor + 1).min(max);
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(entry) = self.col_picker_fields.get_mut(self.col_picker_cursor) {
+                        entry.active = !entry.active;
+                    }
+                    self.resort_col_picker();
+                }
+                KeyCode::Char('K') => self.col_picker_move_up(),
+                KeyCode::Char('J') => self.col_picker_move_down(),
+                KeyCode::Char('t') => {
+                    self.display_names = !self.display_names;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -588,8 +808,8 @@ impl App {
                 let item = self.browser_items.get(self.browser_cursor).cloned();
                 match item {
                     Some(BrowserItem::Table { name, .. }) => self.open_table(&name),
-                    Some(BrowserItem::CustomList { name, table, query, order }) => {
-                        self.open_custom_list(name, table, query, order);
+                    Some(BrowserItem::CustomList { name, table, query, order, columns }) => {
+                        self.open_custom_list(name, table, query, order, columns);
                     }
                     Some(BrowserItem::BrowseAll) => {
                         self.push_view(BaseView::AllTablesBrowser);
@@ -643,6 +863,12 @@ impl App {
             }
             KeyCode::Char('s') => {
                 self.overlay = Some(Overlay::ScriptRunner);
+            }
+            KeyCode::Char('c') => {
+                self.open_col_picker();
+            }
+            KeyCode::Char('t') => {
+                self.display_names = !self.display_names;
             }
             KeyCode::Char('r') => {
                 let query = self.record_filter.clone();
@@ -871,6 +1097,7 @@ fn build_browser_items(categories: &[Category], custom_lists: &[CustomList]) -> 
                 table: list.table.clone(),
                 query: list.query.clone(),
                 order: list.order.clone(),
+                columns: list.columns.clone(),
             });
         }
         items.push(BrowserItem::Header(String::new())); // separator

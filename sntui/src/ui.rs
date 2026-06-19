@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, BaseView, BrowserItem, InputMode, Overlay};
+use crate::app::{App, BaseView, BrowserItem, ColPickerEntry, InputMode, Overlay};
 use crate::tables::display_value;
 
 // ── Palette ────────────────────────────────────────────────────────────────────
@@ -63,6 +63,7 @@ pub fn render(f: &mut Frame, app: &App) {
         match ov {
             Overlay::ScriptRunner => render_script_overlay(f, app, area),
             Overlay::Help => render_help_overlay(f, app, area),
+            Overlay::ColumnPicker => render_col_picker_overlay(f, app, area),
         }
     }
 }
@@ -133,6 +134,12 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let hints: Vec<(&str, &str)> = match (&app.base_view, &app.overlay) {
         (_, Some(Overlay::Help)) => vec![("any key", "close help")],
+        (_, Some(Overlay::ColumnPicker)) => vec![
+            ("Space", "toggle"),
+            ("K/J", "reorder"),
+            ("t", "names"),
+            ("Esc", "save & close"),
+        ],
         (_, Some(Overlay::ScriptRunner)) => vec![
             ("i", "edit"),
             ("Ctrl+R", "run"),
@@ -158,6 +165,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             ("Enter", "describe"),
             ("/", "filter"),
             ("r", "refresh"),
+            ("c", "columns"),
+            ("t", "names"),
             (":", "go to table"),
             ("s", "scripts"),
             ("Esc", "back"),
@@ -218,7 +227,7 @@ fn render_browser(f: &mut Frame, app: &App, area: Rect) {
                     format!("  {name}"),
                     Style::default().fg(C_CATEGORY).add_modifier(Modifier::BOLD),
                 ))),
-                BrowserItem::CustomList { name, table, query, .. } => {
+                BrowserItem::CustomList { name, table, query, columns: _, .. } => {
                     let style = if selected {
                         Style::default().bg(C_SELECTED_BG).fg(Color::White)
                     } else {
@@ -385,32 +394,29 @@ pub fn render_record_list(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Build column constraints from table def
-    let columns = if let Some(ref def) = app.current_table_def {
-        def.columns.clone()
-    } else {
-        vec![
-            crate::tables::ColumnDef { field: "sys_id".into(), header: "sys_id".into(), width: 36 },
-            crate::tables::ColumnDef { field: "sys_updated_on".into(), header: "Updated".into(), width: 0 },
-        ]
-    };
+    let columns = app.effective_columns();
 
     let constraints: Vec<Constraint> = columns
         .iter()
         .map(|c| if c.width == 0 { Constraint::Fill(1) } else { Constraint::Length(c.width) })
         .collect();
 
+    let names_hint = if app.display_names { "" } else { " [tech]" };
     let header_cells: Vec<Cell> = columns
         .iter()
         .map(|c| {
-            // prefer schema label over hardcoded header
-            let label = app.current_schema
-                .as_ref()
-                .and_then(|s| s.columns.get(&c.field))
-                .map(|col| col.label.as_str())
-                .filter(|l| !l.is_empty())
-                .unwrap_or(c.header.as_str());
-            Cell::from(label.to_string()).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+            let label = if app.display_names {
+                app.current_schema
+                    .as_ref()
+                    .and_then(|s| s.columns.get(&c.field))
+                    .map(|col| col.label.as_str())
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or(c.header.as_str())
+            } else {
+                c.field.as_str()
+            };
+            Cell::from(label.to_string())
+                .style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         })
         .collect();
     let header = Row::new(header_cells).style(Style::default().bg(Color::Rgb(25, 25, 45)));
@@ -442,7 +448,7 @@ pub fn render_record_list(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!(" [{}]", app.record_filter)
     };
-    let title = format!(" {} ({}){}  ", label, app.records.len(), filter_info);
+    let title = format!(" {} ({}){}{}  ", label, app.records.len(), filter_info, names_hint);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -565,6 +571,92 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(table, area, &mut state);
 }
 
+// ── Column picker overlay ─────────────────────────────────────────────────────
+
+fn render_col_picker_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(68, 84, area);
+    f.render_widget(Clear, popup);
+
+    let active_count = app.col_picker_fields.iter().filter(|e| e.active).count();
+    let inactive_count = app.col_picker_fields.len() - active_count;
+    let name_mode = if app.display_names { "display" } else { "technical" };
+
+    let block = Block::default()
+        .title(format!(
+            " Columns  {active_count} active · {inactive_count} available  \
+             Space:toggle  K/J:reorder  t:names({name_mode})  Esc:save "
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_ACCENT));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Build render items, injecting a visual separator before the first inactive entry.
+    let mut items: Vec<ListItem> = Vec::new();
+    // render_cursor maps from col_picker_cursor (logical) to list selection index (includes separator).
+    let render_cursor = if app.col_picker_cursor >= active_count && inactive_count > 0 {
+        app.col_picker_cursor + 1
+    } else {
+        app.col_picker_cursor
+    };
+
+    for (i, entry) in app.col_picker_fields.iter().enumerate() {
+        if i == active_count && inactive_count > 0 {
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!(
+                    " ── available ({inactive_count}) {}",
+                    "─".repeat(popup.width.saturating_sub(20) as usize)
+                ),
+                Style::default().fg(C_DIM),
+            ))));
+        }
+
+        let selected = i == app.col_picker_cursor;
+        let bg = if selected { C_SELECTED_BG } else { Color::Reset };
+
+        let (check, check_color) = if entry.active {
+            ("✓", C_GOOD)
+        } else {
+            (" ", C_DIM)
+        };
+
+        let (primary, secondary) = col_picker_names(entry, app.display_names);
+
+        let name_style = Style::default()
+            .fg(if entry.active { Color::White } else { C_DIM })
+            .bg(bg)
+            .add_modifier(if entry.active { Modifier::BOLD } else { Modifier::empty() });
+
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!(" {check} "), Style::default().fg(check_color).bg(bg)),
+            Span::styled(format!("{primary:<32}"), name_style),
+            Span::styled(
+                format!("  {secondary}"),
+                Style::default().fg(C_DIM).bg(bg),
+            ),
+        ])));
+    }
+
+    let mut state = ListState::default().with_selected(Some(render_cursor));
+    f.render_stateful_widget(
+        List::new(items).block(Block::default()),
+        inner,
+        &mut state,
+    );
+}
+
+fn col_picker_names<'a>(entry: &'a ColPickerEntry, display_names: bool) -> (&'a str, &'a str) {
+    if display_names {
+        let primary = if entry.label.is_empty() { entry.field.as_str() } else { entry.label.as_str() };
+        let secondary = if entry.label.is_empty() { "" } else { entry.field.as_str() };
+        (primary, secondary)
+    } else {
+        let secondary = if entry.label.is_empty() { "" } else { entry.label.as_str() };
+        (entry.field.as_str(), secondary)
+    }
+}
+
 // ── Script runner overlay ─────────────────────────────────────────────────────
 
 fn render_script_overlay(f: &mut Frame, app: &App, area: Rect) {
@@ -673,6 +765,8 @@ fn render_help_overlay(f: &mut Frame, _app: &App, area: Rect) {
         Row::new(vec![Cell::from(""), Cell::from("")]),
         Row::new(vec![Cell::from("Tools").style(Style::default().fg(C_CATEGORY).add_modifier(Modifier::BOLD)), Cell::from("")]),
         keybind("s", "Open script runner"),
+        keybind("c", "Column picker (record list)"),
+        keybind("t", "Toggle display / technical names"),
         keybind("?", "Toggle this help"),
         keybind("Ctrl+C", "Quit"),
         Row::new(vec![Cell::from(""), Cell::from("")]),

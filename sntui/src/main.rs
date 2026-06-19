@@ -1,5 +1,6 @@
 mod app;
 mod client;
+mod column_config;
 mod config;
 mod tables;
 mod ui;

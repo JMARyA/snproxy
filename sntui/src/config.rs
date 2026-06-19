@@ -33,6 +33,9 @@ pub struct CustomList {
     pub query: String,
     #[serde(default)]
     pub order: String,
+    /// Column field names to display for this list (optional; overrides table defaults)
+    #[serde(default)]
+    pub columns: Vec<String>,
 }
 
 /// Load config from an explicit path, or search standard locations.
