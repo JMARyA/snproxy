@@ -4,51 +4,47 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, crane }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        craneLib = crane.mkLib pkgs;
 
-        snproxy = pkgs.rustPlatform.buildRustPackage {
-          pname = "snproxy";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "-p" "snproxy" ];
+        # Source filtered to Rust-relevant files only — flake.nix / README edits
+        # don't invalidate the dependency cache.
+        src = craneLib.cleanCargoSource ./.;
+
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
         };
 
-        sncli = pkgs.rustPlatform.buildRustPackage {
-          pname = "sncli";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "-p" "sncli" ];
-        };
+        # Build all workspace dependencies once and cache the result.
+        # Every per-crate derivation below inherits this artifact store, so
+        # dep compilation is not repeated across crates or rebuilds.
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        snstate = pkgs.rustPlatform.buildRustPackage {
-          pname = "snstate";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "-p" "snstate" ];
-        };
+        mkPackage = pname: craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname    = pname;
+          version  = "0.1.0";
+          cargoExtraArgs = "-p ${pname}";
+        });
 
-        sntui = pkgs.rustPlatform.buildRustPackage {
-          pname = "sntui";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "-p" "sntui" ];
-        };
+        snproxy = mkPackage "snproxy";
+        sncli   = mkPackage "sncli";
+        snstate = mkPackage "snstate";
+        sntui   = mkPackage "sntui";
       in
       {
-        packages.snproxy  = snproxy;
-        packages.sncli    = sncli;
-        packages.snstate  = snstate;
-        packages.sntui    = sntui;
-        packages.default  = snproxy;
+        packages.snproxy = snproxy;
+        packages.sncli   = sncli;
+        packages.snstate = snstate;
+        packages.sntui   = sntui;
+        packages.default = snproxy;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
