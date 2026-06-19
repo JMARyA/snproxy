@@ -147,7 +147,7 @@ fn record_path(dir: &Path, table: &str, name: &str) -> PathBuf {
 }
 
 fn state_path(dir: &Path, table: &str, name: &str) -> PathBuf {
-    dir.join(table).join(format!("{name}.state.toml"))
+    dir.join(".state").join(table).join(format!("{name}.toml"))
 }
 
 fn write_toml(path: &Path, value: &JVal) -> Result<()> {
@@ -213,7 +213,7 @@ fn collect_records(dir: &Path, target: Option<&str>) -> Result<Vec<(String, Stri
         {
             let path = entry.path();
             let fname = path.file_name().unwrap().to_string_lossy().to_string();
-            if fname.ends_with(".state.toml") || !fname.ends_with(".toml") {
+            if !fname.ends_with(".toml") {
                 continue;
             }
             let name = fname.trim_end_matches(".toml").to_string();
@@ -305,6 +305,16 @@ fn diff(local: &Map<String, JVal>, reference: &Map<String, JVal>) -> (Vec<(Strin
     (changed, added)
 }
 
+/// Unwrap SN's `{"value": "...", "display_value": "..."}` wrapper to just the value.
+fn unwrap_sn_field(v: &JVal) -> JVal {
+    if let JVal::Object(o) = v {
+        if let Some(val) = o.get("value") {
+            return val.clone();
+        }
+    }
+    v.clone()
+}
+
 fn val_str(v: &JVal) -> String {
     match v {
         JVal::String(s) => s.clone(),
@@ -391,7 +401,7 @@ async fn cmd_pull(server: &str, dir: &Path, args: PullArgs) -> Result<()> {
         let mut file = Map::new();
         if let Some(obj) = record.as_object() {
             for (k, v) in obj {
-                file.insert(k.clone(), v.clone());
+                file.insert(k.clone(), unwrap_sn_field(v));
             }
         }
         file.insert(META_KEY.to_string(), json!({
@@ -503,7 +513,7 @@ async fn cmd_plan(server: &str, dir: &Path, args: TargetArgs) -> Result<()> {
 
         let sn_record = sn_resp["records"].as_array().and_then(|a| a.first()).cloned().unwrap_or(json!({}));
         let sn_fields: Map<String, JVal> = sn_record.as_object()
-            .map(|o| o.iter().filter(|(k, _)| k.as_str() != "sys_id").map(|(k, v)| (k.clone(), v.clone())).collect())
+            .map(|o| o.iter().filter(|(k, _)| k.as_str() != "sys_id").map(|(k, v)| (k.clone(), unwrap_sn_field(v))).collect())
             .unwrap_or_default();
 
         let (changed, added) = diff(&local_fields, &sn_fields);
