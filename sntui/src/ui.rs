@@ -512,15 +512,19 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
             let col = app.current_schema.as_ref().and_then(|s| s.columns.get(k));
             let is_ref = col.map(|c| c.is_reference() && !c.reference.is_empty()).unwrap_or(false);
 
-            let key_text = match col {
-                Some(c) if !c.label.is_empty() && c.label != *k => {
-                    if is_ref {
-                        format!("{} →{}", c.label, c.reference)
-                    } else {
-                        c.label.clone()
+            let key_text = if app.display_names {
+                match col {
+                    Some(c) if !c.label.is_empty() && c.label != *k => {
+                        if is_ref { format!("{} →{}", c.label, c.reference) } else { c.label.clone() }
                     }
+                    _ => k.clone(),
                 }
-                _ => k.clone(),
+            } else {
+                let ref_suffix = col
+                    .filter(|c| is_ref && !c.reference.is_empty())
+                    .map(|c| format!(" →{}", c.reference))
+                    .unwrap_or_default();
+                format!("{k}{ref_suffix}")
             };
             // selected reference fields show the [↵] hint in the value column
             let display_val = if selected && is_ref && !val.is_empty() {
@@ -765,7 +769,8 @@ fn render_help_overlay(f: &mut Frame, _app: &App, area: Rect) {
         Row::new(vec![Cell::from(""), Cell::from("")]),
         Row::new(vec![Cell::from("Tools").style(Style::default().fg(C_CATEGORY).add_modifier(Modifier::BOLD)), Cell::from("")]),
         keybind("s", "Open script runner"),
-        keybind("c", "Column picker (record list)"),
+        keybind("c", "Column picker (record list) / copy field value (detail)"),
+        keybind("R", "Open record in browser"),
         keybind("t", "Toggle display / technical names"),
         keybind("?", "Toggle this help"),
         keybind("Ctrl+C", "Quit"),

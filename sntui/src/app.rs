@@ -880,6 +880,14 @@ impl App {
                 let table = self.current_table.clone();
                 self.load_records(table, query, order);
             }
+            KeyCode::Char('R') => {
+                if !self.records.is_empty() {
+                    let sys_id = extract_sys_id(&self.records[self.record_cursor])
+                        .unwrap_or_default();
+                    let table = self.current_table.clone();
+                    self.open_record_in_browser(&table, &sys_id);
+                }
+            }
             KeyCode::Char('/') => {
                 self.mode = InputMode::Filter;
                 self.filter_buf = self.record_filter.clone();
@@ -948,11 +956,18 @@ impl App {
             }
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             KeyCode::Char('s') => self.overlay = Some(Overlay::ScriptRunner),
+            KeyCode::Char('t') => self.display_names = !self.display_names,
             KeyCode::Char('r') => {
                 let table = self.detail_table.clone();
                 let sys_id = self.detail_sys_id.clone();
                 self.load_detail(table, sys_id);
             }
+            KeyCode::Char('R') => {
+                let table = self.detail_table.clone();
+                let sys_id = self.detail_sys_id.clone();
+                self.open_record_in_browser(&table, &sys_id);
+            }
+            KeyCode::Char('c') => self.copy_current_field_value(),
             KeyCode::Down | KeyCode::Char('j') => {
                 if n > 0 { self.detail_field_cursor = (self.detail_field_cursor + 1).min(n - 1); }
             }
@@ -969,6 +984,40 @@ impl App {
             KeyCode::Char('G') => { if n > 0 { self.detail_field_cursor = n - 1; } }
             _ => {}
         }
+    }
+
+    fn copy_current_field_value(&mut self) {
+        let field = match self.detail_field_keys.get(self.detail_field_cursor) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        let value = self
+            .detail_record
+            .as_ref()
+            .and_then(|r| r.get(&field))
+            .map(crate::tables::display_value)
+            .unwrap_or_default();
+        if copy_to_clipboard(&value) {
+            let preview = truncate_chars(&value, 40);
+            self.status = Some(format!("Copied: {preview}"));
+            self.status_is_error = false;
+        } else {
+            self.status = Some("Clipboard unavailable (install wl-copy or xclip)".into());
+            self.status_is_error = true;
+        }
+    }
+
+    fn open_record_in_browser(&mut self, table: &str, sys_id: &str) {
+        let instance_url = self.health.instance_url.trim_end_matches('/').to_string();
+        if instance_url.is_empty() {
+            self.status = Some("No instance connected".into());
+            self.status_is_error = true;
+            return;
+        }
+        let url = format!("{}/{}.do?sys_id={}", instance_url, table, sys_id);
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        self.status = Some(format!("Opening {url}"));
+        self.status_is_error = false;
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) {
@@ -1130,6 +1179,37 @@ fn last_selectable(items: &[BrowserItem]) -> usize {
         }
     }
     0
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // Try wl-copy (Wayland)
+    if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        return true;
+    }
+    // Fall back to xclip (X11)
+    if let Ok(mut child) = Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        return true;
+    }
+    false
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() { format!("{head}…") } else { head }
 }
 
 fn extract_sys_id(record: &Value) -> Option<String> {
