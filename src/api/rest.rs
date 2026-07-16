@@ -11,7 +11,7 @@ use crate::ws_protocol::WsCommand;
 
 #[derive(Deserialize)]
 pub struct RestReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// HTTP method: GET POST PUT PATCH DELETE
     #[serde(default = "default_get")]
     pub method: String,
@@ -37,7 +37,7 @@ pub async fn handler(
         return Err(AppError::BadRequest("endpoint cannot be empty".into()));
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&r.instance).await?;
     let resp = s.call(WsCommand::RestApi {
         instance,
         method:      r.method.to_uppercase(),

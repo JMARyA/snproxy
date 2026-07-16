@@ -11,7 +11,7 @@ use crate::ws_protocol::WsCommand;
 
 #[derive(Deserialize)]
 pub struct BgReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// Full server-side JavaScript to execute (gs.*, GlideRecord, etc.)
     pub script: String,
 }
@@ -24,7 +24,7 @@ pub async fn bg(
         return Err(AppError::BadRequest("script cannot be empty".into()));
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&r.instance).await?;
     let resp = s.call(WsCommand::BackgroundScript {
         instance,
         script: r.script,
@@ -76,7 +76,7 @@ pub async fn bg(
 
 #[derive(Deserialize)]
 pub struct SlashReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// Full slash command including the leading slash, e.g. "/token" or "/tn"
     pub command: String,
     /// URL pattern to match the target tab (default: any SN tab)
@@ -98,6 +98,7 @@ pub async fn slash(
         return Err(AppError::BadRequest("command cannot be empty".into()));
     }
 
+    s.check_instance(&r.instance).await?;
     let resp = s.call(WsCommand::SlashCommand {
         command:  r.command,
         auto_run: r.auto_run,

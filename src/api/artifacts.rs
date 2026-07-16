@@ -16,7 +16,7 @@ use crate::ws_protocol::WsCommand;
 
 #[derive(Deserialize)]
 pub struct CreateArtifactBody {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub table: String,
     #[serde(default = "default_scope")]
     pub scope: String,
@@ -39,7 +39,7 @@ pub async fn create(
         return Err(AppError::BadRequest("fields.name is required".into()));
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&r.instance).await?;
     let resp = s.call(WsCommand::CreateArtifact {
         instance,
         table_name: r.table.clone(),

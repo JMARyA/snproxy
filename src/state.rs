@@ -52,6 +52,22 @@ impl AppState {
             .ok_or(AppError::NoInstance)
     }
 
+    /// Returns the cached instance only if it matches `requested`, rejecting
+    /// mismatches so callers can't accidentally fire at the wrong environment.
+    pub async fn check_instance(&self, requested: &str) -> Result<Value, AppError> {
+        let inst = self.get_sn_instance().await?;
+        let connected = inst
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let normalized = sncore::normalize_instance(requested);
+        if normalized != connected {
+            return Err(AppError::InstanceMismatch { requested: normalized, connected });
+        }
+        Ok(inst)
+    }
+
     /// Send a message to the Helper Tab without waiting for a reply.
     pub async fn fire(&self, payload: Value) -> Result<(), AppError> {
         let s = payload.to_string();
@@ -129,6 +145,7 @@ impl AppState {
 pub enum AppError {
     NoClient,
     NoInstance,
+    InstanceMismatch { requested: String, connected: String },
     SendFailed,
     Timeout,
     ChannelClosed,
@@ -146,6 +163,10 @@ impl IntoResponse for AppError {
             AppError::NoInstance => (
                 StatusCode::PRECONDITION_FAILED,
                 "no ServiceNow session — run /token from your ServiceNow instance first".to_string(),
+            ),
+            AppError::InstanceMismatch { requested, connected } => (
+                StatusCode::CONFLICT,
+                format!("instance mismatch: requested '{requested}' but '{connected}' is connected — run /token on the correct instance"),
             ),
             AppError::SendFailed => (
                 StatusCode::SERVICE_UNAVAILABLE,

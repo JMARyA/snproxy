@@ -18,7 +18,7 @@ fn default_true() -> bool {
 
 #[derive(Deserialize)]
 pub struct FormStateParams {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// URL pattern to target a specific tab
     pub url: Option<String>,
     pub tab_id: Option<String>,
@@ -30,6 +30,7 @@ pub async fn form_state(
     State(s): State<AppState>,
     Query(p): Query<FormStateParams>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&p.instance).await?;
     let fields = p.fields.map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
     let resp = s.call(WsCommand::FormState {
         url:    p.url,
@@ -51,7 +52,7 @@ pub async fn form_state(
 
 #[derive(Deserialize)]
 pub struct SetFieldReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub field: String,
     pub value: Value,
     /// Display value for reference fields
@@ -64,6 +65,7 @@ pub async fn set_field(
     State(s): State<AppState>,
     Json(r): Json<SetFieldReq>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&r.instance).await?;
     if r.field.trim().is_empty() {
         return Err(AppError::BadRequest("field cannot be empty".into()));
     }
@@ -94,7 +96,7 @@ pub async fn set_field(
 
 #[derive(Deserialize)]
 pub struct UiActionReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// "save" | "submit" | "sysverb_*" | any UI action name
     pub ui_action: String,
     #[serde(default = "default_true")]
@@ -107,6 +109,7 @@ pub async fn ui_action(
     State(s): State<AppState>,
     Json(r): Json<UiActionReq>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&r.instance).await?;
     if r.ui_action.trim().is_empty() {
         return Err(AppError::BadRequest("ui_action cannot be empty".into()));
     }
@@ -135,7 +138,7 @@ pub async fn ui_action(
 
 #[derive(Deserialize)]
 pub struct NavigateReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub url: String,
     pub tab_id: Option<Value>,
     #[serde(default)]
@@ -150,6 +153,7 @@ pub async fn navigate(
     State(s): State<AppState>,
     Json(r): Json<NavigateReq>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&r.instance).await?;
     if r.url.trim().is_empty() {
         return Err(AppError::BadRequest("url cannot be empty".into()));
     }
@@ -176,7 +180,7 @@ pub async fn navigate(
 
 #[derive(Deserialize)]
 pub struct ClickReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub selector: String,
     #[serde(default = "default_true")]
     pub suppress_dialogs: bool,
@@ -188,6 +192,7 @@ pub async fn click(
     State(s): State<AppState>,
     Json(r): Json<ClickReq>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&r.instance).await?;
     if r.selector.trim().is_empty() {
         return Err(AppError::BadRequest("selector cannot be empty".into()));
     }
@@ -216,7 +221,7 @@ pub async fn click(
 
 #[derive(Deserialize)]
 pub struct ScreenshotReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// URL to match / navigate to before capturing
     pub url: Option<String>,
     pub tab_id: Option<Value>,
@@ -229,6 +234,7 @@ pub async fn screenshot(
     State(s): State<AppState>,
     Json(r): Json<ScreenshotReq>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&r.instance).await?;
     if r.url.is_none() && r.tab_id.is_none() {
         return Err(AppError::BadRequest("url or tab_id is required".into()));
     }
@@ -259,7 +265,7 @@ pub async fn screenshot(
 
 #[derive(Deserialize)]
 pub struct TabReq {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub url: String,
     #[serde(default)]
     pub reload: bool,
@@ -273,6 +279,7 @@ pub async fn tab(
     State(s): State<AppState>,
     Json(r): Json<TabReq>,
 ) -> Result<Json<Value>, AppError> {
+    s.check_instance(&r.instance).await?;
     if r.url.trim().is_empty() {
         return Err(AppError::BadRequest("url cannot be empty".into()));
     }

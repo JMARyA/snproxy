@@ -16,7 +16,7 @@ use crate::ws_protocol::WsCommand;
 
 #[derive(Deserialize)]
 pub struct ListParams {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// ServiceNow encoded query, e.g. "active=true^category=software"
     #[serde(default)]
     pub q: String,
@@ -62,7 +62,7 @@ pub async fn list(
         query_string.push_str(&format!("&sysparm_display_value={}", p.display_value));
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&p.instance).await?;
     let resp = s.call(WsCommand::QueryRecords {
         instance,
         table_name: table.clone(),
@@ -88,7 +88,7 @@ pub async fn list(
 
 #[derive(Deserialize)]
 pub struct GetParams {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     /// Comma-separated field list; omit for all fields
     #[serde(default)]
     pub fields: String,
@@ -107,7 +107,7 @@ pub async fn get(
         query_params["sysparm_fields"] = json!(p.fields);
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&p.instance).await?;
     let resp = s.call(WsCommand::RestApi {
         instance,
         method: "GET".into(),
@@ -131,7 +131,7 @@ pub async fn get(
 
 #[derive(Deserialize)]
 pub struct CreateBody {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub fields: Map<String, Value>,
 }
 
@@ -144,7 +144,7 @@ pub async fn create(
         return Err(AppError::BadRequest("fields cannot be empty".into()));
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&body.instance).await?;
     let resp = s.call(WsCommand::RestApi {
         instance,
         method: "POST".into(),
@@ -169,7 +169,7 @@ pub async fn create(
 
 #[derive(Deserialize)]
 pub struct UpdateBody {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
     pub fields: Map<String, Value>,
 }
 
@@ -182,7 +182,7 @@ pub async fn update(
         return Err(AppError::BadRequest("fields cannot be empty".into()));
     }
 
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&body.instance).await?;
     let resp = s.call(WsCommand::RestApi {
         instance,
         method: "PATCH".into(),
@@ -207,15 +207,15 @@ pub async fn update(
 
 #[derive(Deserialize)]
 pub struct DeleteParams {
-    #[allow(dead_code)] pub instance: String,
+    pub instance: String,
 }
 
 pub async fn delete(
     State(s): State<AppState>,
     Path((table, sys_id)): Path<(String, String)>,
-    Query(_p): Query<DeleteParams>,
+    Query(p): Query<DeleteParams>,
 ) -> Result<Json<Value>, AppError> {
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&p.instance).await?;
     let resp = s.call(WsCommand::RestApi {
         instance,
         method: "DELETE".into(),
@@ -240,9 +240,9 @@ pub async fn delete(
 pub async fn schema(
     State(s): State<AppState>,
     Path(table): Path<String>,
-    Query(_p): Query<GetParams>,
+    Query(p): Query<GetParams>,
 ) -> Result<Json<Value>, AppError> {
-    let instance = s.get_sn_instance().await?;
+    let instance = s.check_instance(&p.instance).await?;
     let resp = s.call(WsCommand::TableStructure {
         instance,
         table_name: table.clone(),
