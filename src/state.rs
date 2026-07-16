@@ -59,8 +59,8 @@ impl AppState {
         let connected = inst
             .get("name")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .map(sncore::normalize_instance)
+            .unwrap_or_default();
         let normalized = sncore::normalize_instance(requested);
         if normalized != connected {
             return Err(AppError::InstanceMismatch { requested: normalized, connected });
