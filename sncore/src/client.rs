@@ -38,11 +38,15 @@ pub struct Client {
 
 impl Client {
     pub fn new(port: u16) -> Self {
+        Self::new_with_url(&format!("http://127.0.0.1:{port}"))
+    }
+
+    pub fn new_with_url(base_url: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest client init failed");
-        Self { http, base_url: format!("http://127.0.0.1:{port}") }
+        Self { http, base_url: base_url.trim_end_matches('/').to_string() }
     }
 
     pub async fn health(&self) -> Result<HealthInfo, String> {

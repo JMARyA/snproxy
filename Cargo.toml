@@ -1,5 +1,5 @@
 [workspace]
-members = ["sncli", "snstate", "sncore", "sntui"]
+members = ["sncli", "snstate", "sncore", "sntui", "snpipe"]
 resolver = "2"
 
 [package]
