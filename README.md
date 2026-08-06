@@ -9,6 +9,7 @@ authenticated WebSocket channel — no OAuth, no API keys, no IP allowlist chang
 | **sncli** | CLI for scripts, record CRUD, and schema queries |
 | **sntui** | Terminal UI — browse tables, drill into records, follow references |
 | **snstate** | Terraform-like state management: pull records to disk, push changes back |
+| **snterra** | Real Terraform provider — `terraform plan`/`apply` against ServiceNow records |
 
 ---
 
@@ -59,12 +60,13 @@ No tokens. No admin. No IP allowlists.
 ## Build & install
 
 ```bash
-cargo build --release          # all four binaries → target/release/
+cargo build --release          # all binaries → target/release/
 nix build .#snproxy            # reproducible Nix build
 nix build .#sncli
 nix build .#sntui
 nix build .#snstate
-nix develop                    # dev shell with cargo, rust-analyzer, websocat, jq
+nix build .#snterra
+nix develop                    # dev shell with cargo, rust-analyzer, protoc, websocat, jq
 ```
 
 A NixOS module is included — `services.snproxy.enable = true` installs and starts everything.
@@ -177,6 +179,68 @@ Each file has a `[_meta]` block (instance, table, sys_id) followed by flat field
 `push` skips records whose `.toml` matches `.state.toml` unless `--force` is passed. New
 records are created by dropping a `.toml` without a `sys_id` in `_meta`; after a successful
 POST the file is renamed to `<new_sys_id>.toml`.
+
+---
+
+## snterra
+
+A real Terraform provider — not the TOML-file approximation `snstate` does, an actual
+`terraform-provider-snterra` binary speaking Terraform's plugin protocol, so `terraform
+plan`/`apply`/state/modules all work normally. It has no ServiceNow credentials of its own:
+it's an HTTP client of snproxy's `/records` API, which already carries the browser's
+authenticated session.
+
+It ships one deliberately generic resource, `snterra_record` — table name + a `sys_id` +
+a `fields` map — rather than a hand-modeled resource per ServiceNow table. `read` only ever
+requests the fields listed in `fields`, so Terraform only manages what you declare and
+leaves the rest of the record alone. Updates always PATCH in place — the resource never
+destroys and recreates a record (changing `table` on an existing resource is a plan-time
+error, not a replace: a new sys_id would orphan every reference to the old one elsewhere
+on the platform).
+
+```hcl
+terraform {
+  required_providers {
+    snterra = {
+      source = "local/snproxy/snterra"
+    }
+  }
+}
+
+provider "snterra" {
+  instance = "dev12345"          # must match the instance the Helper Tab is connected to
+  # server = "http://127.0.0.1:8766"   # optional, this is the default
+}
+
+resource "snterra_record" "example" {
+  table = "incident"
+  fields = {
+    short_description = "Created by Terraform"
+    urgency            = "2"
+  }
+}
+```
+
+Since it's not published to a registry, point Terraform at the built binary with a
+`dev_overrides` block in `~/.terraformrc`:
+
+```hcl
+provider_installation {
+  dev_overrides {
+    "local/snproxy/snterra" = "/path/to/snproxy/target/debug"
+  }
+  direct {}
+}
+```
+
+With `dev_overrides` active, skip `terraform init` — Terraform uses the override directly.
+
+Existing records can be scraped into IaC with `terraform import 'snterra_record.example'
+'<table>/<sys_id>'` — import pulls every field on the record except `sys_*` audit/metadata
+fields (sys_created_on, sys_mod_count, sys_updated_by, ...), which aren't meant to be
+managed. Run `terraform show` after importing to get the full field set, then trim it down
+in your `.tf` config to just what you actually want Terraform to own — anything you drop
+from `fields` goes back to being unmanaged, not deleted.
 
 ---
 

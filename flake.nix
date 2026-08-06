@@ -20,6 +20,8 @@
         commonArgs = {
           inherit src;
           strictDeps = true;
+          # snterra depends on tf-provider, which needs protoc (prost-build) at compile time.
+          nativeBuildInputs = [ pkgs.protobuf ];
         };
 
         # Build all workspace dependencies once and cache the result.
@@ -38,12 +40,14 @@
         sncli   = mkPackage "sncli";
         snstate = mkPackage "snstate";
         sntui   = mkPackage "sntui";
+        snterra = mkPackage "snterra";
       in
       {
         packages.snproxy = snproxy;
         packages.sncli   = sncli;
         packages.snstate = snstate;
         packages.sntui   = sntui;
+        packages.snterra = snterra;
         packages.default = snproxy;
 
         devShells.default = pkgs.mkShell {
@@ -52,6 +56,7 @@
             cargo
             clippy
             rust-analyzer
+            protobuf
             # testing / manual inspection
             websocat
             curl
@@ -67,6 +72,7 @@
             echo "  nix build .#sncli"
             echo "  nix build .#snstate"
             echo "  nix build .#sntui"
+            echo "  nix build .#snterra"
           '';
         };
       }
