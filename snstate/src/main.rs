@@ -62,6 +62,8 @@ enum Cmd {
     Status,
     /// Show what push would change against live ServiceNow state
     Plan(TargetArgs),
+    /// Re-read current state from ServiceNow and update local state files
+    Refresh(RefreshArgs),
     /// Apply local changes to ServiceNow
     Push(PushArgs),
     /// Alias for push
@@ -90,6 +92,15 @@ struct PullArgs {
 
 #[derive(Args)]
 struct TargetArgs {
+    /// Optional filter: "incident" (whole table) or "incident/<sys_id>" (single record)
+    target: Option<String>,
+    /// Override instance (defaults to _meta.instance from the file)
+    #[arg(long, short = 'i', env = "SNPROXY_INSTANCE")]
+    instance: Option<String>,
+}
+
+#[derive(Args)]
+struct RefreshArgs {
     /// Optional filter: "incident" (whole table) or "incident/<sys_id>" (single record)
     target: Option<String>,
     /// Override instance (defaults to _meta.instance from the file)
@@ -170,15 +181,30 @@ fn read_toml(path: &Path) -> Result<JVal> {
 }
 
 /// Fields from a record file, excluding _meta and sys_id (identity, not a writable field).
+/// State metadata stored alongside the baseline so we can detect instance changes.
+const STATE_META_KEY: &str = "_state";
+
 fn editable_fields(v: &JVal) -> Map<String, JVal> {
     v.as_object()
         .map(|o| {
             o.iter()
-                .filter(|(k, _)| k.as_str() != META_KEY && k.as_str() != "sys_id")
+                .filter(|(k, _)| k.as_str() != META_KEY && k.as_str() != STATE_META_KEY && k.as_str() != "sys_id")
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn state_meta(v: &JVal) -> Option<&JVal> {
+    v.get(STATE_META_KEY)
+}
+
+fn set_state_meta(v: &mut Map<String, JVal>, instance: &str) {
+    let sm = v.entry(STATE_META_KEY.to_string())
+        .or_insert_with(|| JVal::Object(Default::default()))
+        .as_object_mut()
+        .unwrap();
+    sm.insert("instance".to_string(), JVal::String(instance.to_string()));
 }
 
 fn meta_str<'a>(v: &'a JVal, key: &str) -> Option<&'a str> {
@@ -416,7 +442,10 @@ async fn cmd_pull(server: &str, dir: &Path, args: PullArgs) -> Result<()> {
         let is_new = !rpath.exists();
 
         write_toml(&rpath, &content)?;
-        write_toml(&spath, &content)?;
+        // Baseline records the instance so we can detect cloning later
+        let mut sc = content.as_object().cloned().unwrap_or_default();
+        set_state_meta(&mut sc, &instance);
+        write_toml(&spath, &JVal::Object(sc))?;
 
         let label = record.get("number")
             .or_else(|| record.get("name"))
@@ -537,6 +566,89 @@ async fn cmd_plan(server: &str, dir: &Path, args: TargetArgs) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_refresh(server: &str, dir: &Path, args: RefreshArgs) -> Result<()> {
+    let client = Client::new();
+    let records = collect_records(dir, args.target.as_deref())?;
+
+    if records.is_empty() {
+        println!("No records found. Run `snstate pull` first.");
+        return Ok(());
+    }
+
+    let mut refreshed = 0usize;
+    let mut errors = 0usize;
+
+    for (table, name, path) in &records {
+        let local = read_toml(path)?;
+        let instance = args.instance.as_deref()
+            .map(normalize_instance)
+            .or_else(|| meta_str(&local, "instance").map(String::from))
+            .ok_or_else(|| anyhow::anyhow!("{table}/{name}: no instance — use -i or re-pull first"))?;
+
+        let sys_id = meta_str(&local, "sys_id");
+        let Some(sys_id) = sys_id else {
+            eprintln!("  !  {table}/{name}.toml: no sys_id — skipping refresh");
+            errors += 1;
+            continue;
+        };
+
+        // Fetch current state from ServiceNow
+        let field_list = editable_fields(&local).keys().map(String::as_str).collect::<Vec<_>>().join(",");
+        let url = format!(
+            "{server}/records/{table}?instance={inst}&q=sys_id%3D{sys_id}&fields={fields}&limit=1",
+            inst   = urlenc(&instance),
+            fields = urlenc(&field_list),
+        );
+
+        let sn_resp = match api(&client, Method::GET, &url, None).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("  !  {table}/{name}: fetch failed — {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        let sn_record = sn_resp["records"].as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(json!({}));
+
+        // If the record no longer exists on the instance, remove the baseline only.
+        // The local file (desired state) is preserved — user may want to recreate it.
+        let is_null_record = sn_record.is_null()
+            || sn_record.get("sys_id").is_none();
+        if is_null_record {
+            println!("  ✗  {table}/{name}.toml  deleted on {instance} — state cleared");
+            let _ = std::fs::remove_file(state_path(dir, table, name));
+            refreshed += 1;
+            continue;
+        }
+
+        let sn_fields: Map<String, JVal> = sn_record.as_object()
+            .map(|o| o.iter()
+                .filter(|(k, _)| k.as_str() != "sys_id")
+                .map(|(k, v)| (k.clone(), unwrap_sn_field(v)))
+                .collect())
+            .unwrap_or_default();
+
+        // Update the state file with current values
+        let spath = state_path(dir, table, name);
+        let mut state_content = Map::new();
+        for (k, v) in sn_fields {
+            state_content.insert(k, v);
+        }
+        state_content.insert(STATE_META_KEY.to_string(), json!({ "instance": instance }));
+        write_toml(&spath, &JVal::Object(state_content))?;
+
+        println!("  ok  {table}/{name}.toml  refreshed from {instance}");
+        refreshed += 1;
+    }
+
+    println!("\n{refreshed} record(s) refreshed, {errors} error(s).");
+    Ok(())
+}
+
 async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
     let client = Client::new();
     let records = collect_records(dir, args.target.as_deref())?;
@@ -564,17 +676,77 @@ async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
         let fields = editable_fields(&local);
         let sys_id = meta_str(&local, "sys_id").map(String::from);
 
-        // Skip if unchanged vs baseline (unless --force or new record)
-        if !args.force && sys_id.is_some() {
-            let spath = state_path(dir, table, name);
-            if spath.exists() {
-                let state = read_toml(&spath)?;
-                let (changed, added) = diff(&fields, &editable_fields(&state));
-                if !has_diff(&changed, &added) {
-                    println!("  -  {table}/{name}.toml  (unchanged, skipping)");
-                    skipped += 1;
+        // Skip if unchanged vs baseline AND pushing to the same instance.
+        // If the target instance differs from where the record was pulled from,
+        // treat it as a create (clone) — drop sys_id so SN assigns a new one.
+        let is_clone = match sys_id {
+            Some(ref id) => {
+                let spath = state_path(dir, table, name);
+                if spath.exists() {
+                    let state = read_toml(&spath)?;
+                    let (changed, added) = diff(&fields, &editable_fields(&state));
+                    if !has_diff(&changed, &added) {
+                        // Also check if instance changed — that means clone
+                        let target = instance.clone();
+                        let orig_instance = state_meta(&state)
+                            .and_then(|m| m.get("instance"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if target == orig_instance {
+                            println!("  -  {table}/{name}.toml  (unchanged, skipping)");
+                            skipped += 1;
+                            continue;
+                        } else {
+                            println!("  →  {table}/{name}.toml  (clone: instance changed {} → {})", orig_instance, target);
+                            true // is_clone
+                        }
+                    } else {
+                        false // has actual diffs — do PATCH/CREATE normally
+                    }
+                } else {
+                    false // no baseline — treat as new record
+                }
+            }
+            None => false,
+        };
+
+        if is_clone {
+            // For cloning, treat as a create — drop sys_id so target SN assigns a new one
+            match sys_id {
+                Some(_) => {
+                    if args.dry_run {
+                        println!("  +  {table}/{name}.toml  would CREATE on {instance} ({} field(s))", fields.len());
+                        continue;
+                    }
+                    let url  = format!("{server}/records/{table}");
+                    let body = json!({ "instance": instance, "fields": fields });
+                    match api(&client, Method::POST, &url, Some(&body)).await {
+                        Ok(resp) => {
+                            let new_id = resp["sys_id"].as_str().unwrap_or("unknown").to_string();
+                            println!("  ok  {table}/{name}.toml  created → {new_id}");
+                            let mut updated_file = local.as_object().cloned().unwrap_or_default();
+                            updated_file.insert("sys_id".to_string(), json!(&new_id));
+                            updated_file.insert(META_KEY.to_string(), json!({
+                                "instance": instance, "table": table, "sys_id": new_id,
+                            }));
+                            // Update state meta to point to the new instance
+                            set_state_meta(&mut updated_file, &instance);
+                            let content = JVal::Object(updated_file);
+                            let new_rpath = record_path(dir, table, &new_id);
+                            write_toml(&new_rpath, &content)?;
+                            write_toml(&state_path(dir, table, &new_id), &content)?;
+                            if path != &new_rpath {
+                                let _ = std::fs::remove_file(path);
+                                let _ = std::fs::remove_file(state_path(dir, table, &name));
+                                println!("       renamed {name}.toml -> {new_id}.toml");
+                            }
+                            created += 1;
+                        }
+                        Err(e) => eprintln!("  err {table}/{name}.toml  CREATE failed: {e}"),
+                    }
                     continue;
                 }
+                None => {}
             }
         }
 
@@ -656,6 +828,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Pull(args)             => cmd_pull(&server, dir, args).await,
         Cmd::Status                 => cmd_status(dir),
         Cmd::Plan(args)             => cmd_plan(&server, dir, args).await,
+        Cmd::Refresh(args)          => cmd_refresh(&server, dir, args).await,
         Cmd::Push(args) |
         Cmd::Apply(args)            => cmd_push(&server, dir, args).await,
     }
