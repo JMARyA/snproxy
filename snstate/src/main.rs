@@ -30,7 +30,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use reqwest::{Client, Method};
 use serde_json::{json, Map, Value as JVal};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use toml::Value as TVal;
 
 const META_KEY: &str = "_meta";
@@ -307,6 +309,26 @@ fn urlenc(s: &str) -> String {
     out
 }
 
+// ── color ─────────────────────────────────────────────────────────────────────
+
+fn color_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+    })
+}
+
+fn paint(code: &str, s: &str) -> String {
+    if color_enabled() { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() }
+}
+
+fn green(s: &str)  -> String { paint("32", s) }
+fn red(s: &str)    -> String { paint("31", s) }
+fn yellow(s: &str) -> String { paint("33", s) }
+fn cyan(s: &str)   -> String { paint("36", s) }
+fn dim(s: &str)    -> String { paint("2", s) }
+fn bold(s: &str)   -> String { paint("1", s) }
+
 // ── diff helpers ──────────────────────────────────────────────────────────────
 
 /// Returns (changed [(field, old, new)], added [field only in local]).
@@ -355,10 +377,10 @@ fn has_diff(changed: &[(String, String, String)], added: &[String]) -> bool {
 
 fn print_diff(changed: &[(String, String, String)], added: &[String]) {
     for (field, old, new) in changed {
-        println!("       {field}: {:?} -> {:?}", old, new);
+        println!("       {field}: {} -> {}", red(&format!("{old:?}")), green(&format!("{new:?}")));
     }
     for field in added {
-        println!("       + {field} (not in current SN state)");
+        println!("       {} {field} (not in current SN state)", green("+"));
     }
 }
 
@@ -415,12 +437,12 @@ async fn cmd_pull(server: &str, dir: &Path, args: PullArgs) -> Result<()> {
 
         let resp = match api(&client, Method::GET, &record_url, None).await {
             Ok(v)  => v,
-            Err(e) => { eprintln!("  skip {sys_id}: {e}"); continue; }
+            Err(e) => { eprintln!("  {} {sys_id}: {e}", red("skip")); continue; }
         };
 
         let record = &resp["record"];
         if record.is_null() {
-            eprintln!("  skip {sys_id}: no record in response");
+            eprintln!("  {} {sys_id}: no record in response", red("skip"));
             continue;
         }
 
@@ -453,12 +475,46 @@ async fn cmd_pull(server: &str, dir: &Path, args: PullArgs) -> Result<()> {
             .map(|s| format!("  ({s})"))
             .unwrap_or_default();
 
-        println!("  {}  {}/{sys_id}.toml{label}", if is_new { "pulled " } else { "updated" }, args.table);
+        let verb = if is_new { green("pulled ") } else { yellow("updated") };
+        println!("  {verb}  {}/{sys_id}.toml{label}", args.table);
         written += 1;
     }
 
-    println!("\n{written} record(s) written to {}/", args.table);
+    println!("\n{} record(s) written to {}/", bold(&written.to_string()), args.table);
     Ok(())
+}
+
+enum RecordStatus {
+    New,
+    Modified,
+    Unchanged,
+}
+
+/// Local-only comparison (record file vs its baseline) — no network access,
+/// safe to run off the main thread.
+fn record_status(dir: &Path, table: &str, name: &str, path: &Path) -> Result<(String, RecordStatus)> {
+    let local = read_toml(path)?;
+    let spath = state_path(dir, table, name);
+
+    if !spath.exists() {
+        return Ok((
+            format!("  {}  {table}/{name}.toml  (no baseline — will CREATE on push)", green("+")),
+            RecordStatus::New,
+        ));
+    }
+
+    let state = read_toml(&spath)?;
+    let (changed, added) = diff(&editable_fields(&local), &editable_fields(&state));
+
+    if has_diff(&changed, &added) {
+        let n = changed.len() + added.len();
+        Ok((
+            format!("  {}  {table}/{name}.toml  ({n} field(s) modified)", yellow("M")),
+            RecordStatus::Modified,
+        ))
+    } else {
+        Ok((format!("  {}  {table}/{name}.toml", dim("=")), RecordStatus::Unchanged))
+    }
 }
 
 fn cmd_status(dir: &Path) -> Result<()> {
@@ -469,32 +525,53 @@ fn cmd_status(dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let mut any = false;
-    for (table, name, path) in &records {
-        let local = read_toml(path)?;
-        let spath = state_path(dir, table, name);
+    // Purely local file I/O (record + baseline reads) — fan it out across
+    // threads instead of walking records one at a time.
+    let workers = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4).min(records.len());
+    let chunk_size = records.len().div_ceil(workers.max(1)).max(1);
 
-        if !spath.exists() {
-            println!("  +  {table}/{name}.toml  (no baseline — will CREATE on push)");
-            any = true;
-            continue;
-        }
+    let results: Vec<Result<(String, RecordStatus)>> = std::thread::scope(|scope| {
+        records
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk.iter()
+                        .map(|(table, name, path)| record_status(dir, table, name, path))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|h| h.join().expect("status worker panicked"))
+            .collect()
+    });
 
-        let state  = read_toml(&spath)?;
-        let (changed, added) = diff(&editable_fields(&local), &editable_fields(&state));
+    let mut to_add = 0usize;
+    let mut to_change = 0usize;
+    let mut unchanged = 0usize;
 
-        if has_diff(&changed, &added) {
-            println!("  M  {table}/{name}.toml  ({} field(s) modified)", changed.len() + added.len());
-            any = true;
-        } else {
-            println!("  =  {table}/{name}.toml");
+    for r in results {
+        let (line, status) = r?;
+        println!("{line}");
+        match status {
+            RecordStatus::New       => to_add += 1,
+            RecordStatus::Modified  => to_change += 1,
+            RecordStatus::Unchanged => unchanged += 1,
         }
     }
 
-    if !any {
-        println!("\nNo local changes. Run `snstate plan` to compare against live ServiceNow.");
+    println!(
+        "\n{} {} to add, {} to change, {} unchanged.",
+        bold("Plan:"),
+        paint("1;32", &to_add.to_string()),
+        paint("1;33", &to_change.to_string()),
+        dim(&unchanged.to_string()),
+    );
+
+    if to_add == 0 && to_change == 0 {
+        println!("No local changes. Run `snstate plan` to compare against live ServiceNow.");
     } else {
-        println!("\nRun `snstate plan` to diff against live SN, or `snstate push` to apply.");
+        println!("Run `snstate plan` to diff against live SN, or `snstate push` to apply.");
     }
     Ok(())
 }
@@ -523,7 +600,7 @@ async fn cmd_plan(server: &str, dir: &Path, args: TargetArgs) -> Result<()> {
         let sys_id = meta_str(&local, "sys_id");
 
         let Some(sys_id) = sys_id else {
-            println!("  +  {table}/{name}.toml  will CREATE");
+            println!("  {}  {table}/{name}.toml  will CREATE", green("+"));
             total_creates += 1;
             continue;
         };
@@ -537,7 +614,7 @@ async fn cmd_plan(server: &str, dir: &Path, args: TargetArgs) -> Result<()> {
 
         let sn_resp = match api(&client, Method::GET, &url, None).await {
             Ok(v)  => v,
-            Err(e) => { eprintln!("  !  {table}/{name}: fetch failed — {e}"); continue; }
+            Err(e) => { eprintln!("  {}  {table}/{name}: fetch failed — {e}", red("!")); continue; }
         };
 
         let sn_record = sn_resp["records"].as_array().and_then(|a| a.first()).cloned().unwrap_or(json!({}));
@@ -547,21 +624,27 @@ async fn cmd_plan(server: &str, dir: &Path, args: TargetArgs) -> Result<()> {
 
         let (changed, added) = diff(&local_fields, &sn_fields);
         if has_diff(&changed, &added) {
-            println!("  ~  {table}/{name}.toml");
+            println!("  {}  {table}/{name}.toml", yellow("~"));
             print_diff(&changed, &added);
             total_updates += 1;
         } else {
-            println!("  =  {table}/{name}.toml  (no changes)");
+            println!("  {}  {table}/{name}.toml  (no changes)", dim("="));
             total_same += 1;
         }
     }
 
     println!();
     if total_updates > 0 || total_creates > 0 {
-        println!("Plan: {total_updates} to update, {total_creates} to create, {total_same} unchanged.");
+        println!(
+            "{} {} to update, {} to create, {} unchanged.",
+            bold("Plan:"),
+            paint("1;33", &total_updates.to_string()),
+            paint("1;32", &total_creates.to_string()),
+            dim(&total_same.to_string()),
+        );
         println!("Run `snstate push` to apply.");
     } else {
-        println!("ServiceNow is already up to date ({total_same} record(s) checked).");
+        println!("{} ({total_same} record(s) checked).", green("ServiceNow is already up to date"));
     }
     Ok(())
 }
@@ -587,13 +670,18 @@ async fn cmd_refresh(server: &str, dir: &Path, args: RefreshArgs) -> Result<()> 
 
         let sys_id = meta_str(&local, "sys_id");
         let Some(sys_id) = sys_id else {
-            eprintln!("  !  {table}/{name}.toml: no sys_id — skipping refresh");
+            eprintln!("  {}  {table}/{name}.toml: no sys_id — skipping refresh", red("!"));
             errors += 1;
             continue;
         };
 
-        // Fetch current state from ServiceNow
-        let field_list = editable_fields(&local).keys().map(String::as_str).collect::<Vec<_>>().join(",");
+        // Fetch current state from ServiceNow. sys_id must always be requested
+        // explicitly (editable_fields() strips it as non-writable) — the
+        // existence check below depends on it coming back.
+        let local_fields = editable_fields(&local);
+        let mut field_list: Vec<&str> = vec!["sys_id"];
+        field_list.extend(local_fields.keys().map(String::as_str));
+        let field_list = field_list.join(",");
         let url = format!(
             "{server}/records/{table}?instance={inst}&q=sys_id%3D{sys_id}&fields={fields}&limit=1",
             inst   = urlenc(&instance),
@@ -603,7 +691,7 @@ async fn cmd_refresh(server: &str, dir: &Path, args: RefreshArgs) -> Result<()> 
         let sn_resp = match api(&client, Method::GET, &url, None).await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("  !  {table}/{name}: fetch failed — {e}");
+                eprintln!("  {}  {table}/{name}: fetch failed — {e}", red("!"));
                 errors += 1;
                 continue;
             }
@@ -619,7 +707,7 @@ async fn cmd_refresh(server: &str, dir: &Path, args: RefreshArgs) -> Result<()> 
         let is_null_record = sn_record.is_null()
             || sn_record.get("sys_id").is_none();
         if is_null_record {
-            println!("  ✗  {table}/{name}.toml  deleted on {instance} — state cleared");
+            println!("  {}  {table}/{name}.toml  deleted on {instance} — state cleared", red("✗"));
             let _ = std::fs::remove_file(state_path(dir, table, name));
             refreshed += 1;
             continue;
@@ -641,11 +729,15 @@ async fn cmd_refresh(server: &str, dir: &Path, args: RefreshArgs) -> Result<()> 
         state_content.insert(STATE_META_KEY.to_string(), json!({ "instance": instance }));
         write_toml(&spath, &JVal::Object(state_content))?;
 
-        println!("  ok  {table}/{name}.toml  refreshed from {instance}");
+        println!("  {}  {table}/{name}.toml  refreshed from {instance}", green("ok"));
         refreshed += 1;
     }
 
-    println!("\n{refreshed} record(s) refreshed, {errors} error(s).");
+    println!(
+        "\n{} record(s) refreshed, {} error(s).",
+        green(&refreshed.to_string()),
+        if errors > 0 { red(&errors.to_string()) } else { dim(&errors.to_string()) },
+    );
     Ok(())
 }
 
@@ -659,7 +751,7 @@ async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
     }
 
     if args.dry_run {
-        println!("Dry run — no changes will be made.\n");
+        println!("{}\n", cyan("Dry run — no changes will be made."));
     }
 
     let mut updated = 0usize;
@@ -674,102 +766,81 @@ async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("{table}/{name}: no instance — use -i or re-pull first"))?;
 
         let fields = editable_fields(&local);
-        let sys_id = meta_str(&local, "sys_id").map(String::from);
+        let sys_id_str = meta_str(&local, "sys_id").map(String::from);
+        let spath = state_path(dir, table, name);
+        let baseline = if spath.exists() { Some(read_toml(&spath)?) } else { None };
 
-        // Skip if unchanged vs baseline AND pushing to the same instance.
-        // If the target instance differs from where the record was pulled from,
-        // treat it as a create (clone) — drop sys_id so SN assigns a new one.
-        let is_clone = match sys_id {
-            Some(ref id) => {
-                let spath = state_path(dir, table, name);
-                if spath.exists() {
-                    let state = read_toml(&spath)?;
-                    let (changed, added) = diff(&fields, &editable_fields(&state));
-                    if !has_diff(&changed, &added) {
-                        // Also check if instance changed — that means clone
-                        let target = instance.clone();
-                        let orig_instance = state_meta(&state)
-                            .and_then(|m| m.get("instance"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if target == orig_instance {
-                            println!("  -  {table}/{name}.toml  (unchanged, skipping)");
-                            skipped += 1;
-                            continue;
-                        } else {
-                            println!("  →  {table}/{name}.toml  (clone: instance changed {} → {})", orig_instance, target);
-                            true // is_clone
-                        }
-                    } else {
-                        false // has actual diffs — do PATCH/CREATE normally
-                    }
-                } else {
-                    false // no baseline — treat as new record
-                }
+        // A record needs a forced-sys_id CREATE (a "clone") whenever we don't have a
+        // baseline confirming it already exists on the target instance: either it was
+        // never pulled/refreshed against this instance, or `refresh` found it missing
+        // there and dropped the baseline. A baseline with no recorded instance (files
+        // from before this existed) is assumed to belong to the target instance rather
+        // than treated as a clone.
+        let needs_clone = match (&sys_id_str, &baseline) {
+            (Some(_), Some(state)) => {
+                state_meta(state)
+                    .and_then(|m| m.get("instance"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|baseline_instance| baseline_instance != instance)
             }
-            None => false,
+            (Some(_), None) => true,
+            (None, _) => false,
         };
 
-        if is_clone {
-            // For cloning, treat as a create — drop sys_id so target SN assigns a new one
-            match sys_id {
-                Some(_) => {
-                    if args.dry_run {
-                        println!("  +  {table}/{name}.toml  would CREATE on {instance} ({} field(s))", fields.len());
-                        continue;
-                    }
-                    let url  = format!("{server}/records/{table}");
-                    let body = json!({ "instance": instance, "fields": fields });
-                    match api(&client, Method::POST, &url, Some(&body)).await {
-                        Ok(resp) => {
-                            let new_id = resp["sys_id"].as_str().unwrap_or("unknown").to_string();
-                            println!("  ok  {table}/{name}.toml  created → {new_id}");
-                            let mut updated_file = local.as_object().cloned().unwrap_or_default();
-                            updated_file.insert("sys_id".to_string(), json!(&new_id));
-                            updated_file.insert(META_KEY.to_string(), json!({
-                                "instance": instance, "table": table, "sys_id": new_id,
-                            }));
-                            // Update state meta to point to the new instance
-                            set_state_meta(&mut updated_file, &instance);
-                            let content = JVal::Object(updated_file);
-                            let new_rpath = record_path(dir, table, &new_id);
-                            write_toml(&new_rpath, &content)?;
-                            write_toml(&state_path(dir, table, &new_id), &content)?;
-                            if path != &new_rpath {
-                                let _ = std::fs::remove_file(path);
-                                let _ = std::fs::remove_file(state_path(dir, table, &name));
-                                println!("       renamed {name}.toml -> {new_id}.toml");
-                            }
-                            created += 1;
-                        }
-                        Err(e) => eprintln!("  err {table}/{name}.toml  CREATE failed: {e}"),
-                    }
-                    continue;
+        if needs_clone {
+            // Clone: POST with the source sys_id forced, so the record keeps the same
+            // identity on the destination instance.
+            let id = sys_id_str.as_deref().expect("needs_clone implies Some(sys_id)");
+            if args.dry_run {
+                println!("  {}  {table}/{name}.toml  would CREATE {id} on {instance}", green("+"));
+                continue;
+            }
+            let url  = format!("{server}/records/{table}");
+            let mut clone_fields = fields.clone();
+            clone_fields.insert("sys_id".to_string(), json!(id));
+            let body = json!({ "instance": instance, "fields": clone_fields });
+            match api(&client, Method::POST, &url, Some(&body)).await {
+                Ok(_) => {
+                    println!("  {}  {table}/{name}.toml  cloned to {instance} (sys_id={id})", green("ok"));
+                    let mut state_content = fields.clone();
+                    state_content.insert(STATE_META_KEY.to_string(), json!({ "instance": instance }));
+                    write_toml(&spath, &JVal::Object(state_content))?;
+                    created += 1;
                 }
-                None => {}
+                Err(e) => eprintln!("  {} {table}/{name}.toml  clone failed: {e}", red("err")),
+            }
+            continue;
+        }
+
+        if let Some(state) = &baseline {
+            let (changed, added) = diff(&fields, &editable_fields(state));
+            if !args.force && !has_diff(&changed, &added) {
+                println!("  {}  {table}/{name}.toml  (unchanged, skipping)", dim("-"));
+                skipped += 1;
+                continue;
             }
         }
 
-        match sys_id {
+        match sys_id_str {
             Some(ref id) => {
                 if args.dry_run {
-                    println!("  ~  {table}/{name}.toml  would PATCH {id} ({} field(s))", fields.len());
+                    println!("  {}  {table}/{name}.toml  would PATCH {id} ({} field(s))", yellow("~"), fields.len());
                     continue;
                 }
                 let url  = format!("{server}/records/{table}/{id}");
                 let body = json!({ "instance": instance, "fields": fields });
                 match api(&client, Method::PATCH, &url, Some(&body)).await {
                     Ok(_) => {
-                        println!("  ok  {table}/{name}.toml  patched");
+                        println!("  {}  {table}/{name}.toml  patched", green("ok"));
                         write_toml(&state_path(dir, table, name), &local)?;
                         updated += 1;
                     }
-                    Err(e) => eprintln!("  err {table}/{name}.toml  PATCH failed: {e}"),
+                    Err(e) => eprintln!("  {} {table}/{name}.toml  PATCH failed: {e}", red("err")),
                 }
             }
             None => {
                 if args.dry_run {
-                    println!("  +  {table}/{name}.toml  would CREATE ({} field(s))", fields.len());
+                    println!("  {}  {table}/{name}.toml  would CREATE ({} field(s))", green("+"), fields.len());
                     continue;
                 }
                 let url  = format!("{server}/records/{table}");
@@ -777,7 +848,7 @@ async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
                 match api(&client, Method::POST, &url, Some(&body)).await {
                     Ok(resp) => {
                         let new_id = resp["sys_id"].as_str().unwrap_or("unknown").to_string();
-                        println!("  ok  {table}/{name}.toml  created → {new_id}");
+                        println!("  {}  {table}/{name}.toml  created → {new_id}", green("ok"));
 
                         // Rewrite under the real sys_id
                         let mut updated_file = local.as_object().cloned().unwrap_or_default();
@@ -794,18 +865,24 @@ async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
                         if path != &new_rpath {
                             let _ = std::fs::remove_file(path);
                             let _ = std::fs::remove_file(state_path(dir, table, &name));
-                            println!("       renamed {name}.toml -> {new_id}.toml");
+                            println!("       {}", dim(&format!("renamed {name}.toml -> {new_id}.toml")));
                         }
                         created += 1;
                     }
-                    Err(e) => eprintln!("  err {table}/{name}.toml  CREATE failed: {e}"),
+                    Err(e) => eprintln!("  {} {table}/{name}.toml  CREATE failed: {e}", red("err")),
                 }
             }
         }
     }
 
     if !args.dry_run {
-        println!("\n{updated} updated, {created} created, {skipped} skipped.");
+        println!(
+            "\n{} {} updated, {} created, {} skipped.",
+            bold("Apply complete!"),
+            paint("1;33", &updated.to_string()),
+            paint("1;32", &created.to_string()),
+            dim(&skipped.to_string()),
+        );
     }
     Ok(())
 }
@@ -816,7 +893,7 @@ async fn cmd_push(server: &str, dir: &Path, args: PushArgs) -> Result<()> {
 async fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
-        eprintln!("error: {e:#}");
+        eprintln!("{} {e:#}", bold(&red("error:")));
         std::process::exit(1);
     }
 }
