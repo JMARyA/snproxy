@@ -156,6 +156,13 @@ pub async fn create(
     check_rest_response(&resp)?;
 
     let result = resp["data"]["result"].clone();
+    if !result.is_object() {
+        tracing::warn!("POST /api/now/table/{table} had no result in response; full resp: {resp}");
+        return Err(AppError::Remote(format!(
+            "POST returned no created record (raw response: {resp})"
+        )));
+    }
+
     Ok(Json(json!({
         "sys_id": result["sys_id"],
         "table":  table,
@@ -193,11 +200,23 @@ pub async fn update(
 
     check_rest_response(&resp)?;
 
+    let result = resp["data"]["result"].clone();
+    if !result.is_object() {
+        // A real PATCH always echoes the updated record. `check_rest_response`
+        // only catches an explicit `success: false`; some extension-side
+        // failures (e.g. a request the Helper Tab didn't actually issue) come
+        // back without that flag, which used to read as a silent success.
+        tracing::warn!("PATCH /api/now/table/{table}/{sys_id} had no result in response; full resp: {resp}");
+        return Err(AppError::Remote(format!(
+            "PATCH returned no updated record — the write may not have gone through (raw response: {resp})"
+        )));
+    }
+
     Ok(Json(json!({
         "table":   table,
         "sys_id":  sys_id,
         "updated": true,
-        "record":  resp["data"]["result"].clone(),
+        "record":  result,
     })))
 }
 

@@ -182,15 +182,21 @@ fn read_toml(path: &Path) -> Result<JVal> {
     Ok(toml_to_json(tv))
 }
 
-/// Fields from a record file, excluding _meta and sys_id (identity, not a writable field).
-/// State metadata stored alongside the baseline so we can detect instance changes.
+/// Fields from a record file, excluding _meta/_state and ServiceNow's own
+/// audit/bookkeeping columns. State metadata stored alongside the baseline so
+/// we can detect instance changes.
 const STATE_META_KEY: &str = "_state";
 
+/// `sys_*` fields (sys_id, sys_created_on, sys_mod_count, sys_updated_by, ...)
+/// are managed by ServiceNow itself. `pull` stores them (useful context when
+/// inspecting a record), but writing them back on `push` fights ServiceNow's
+/// own bookkeeping and commonly gets rejected with a 403 — see the same
+/// exclusion in ../snterra/src/resource.rs.
 fn editable_fields(v: &JVal) -> Map<String, JVal> {
     v.as_object()
         .map(|o| {
             o.iter()
-                .filter(|(k, _)| k.as_str() != META_KEY && k.as_str() != STATE_META_KEY && k.as_str() != "sys_id")
+                .filter(|(k, _)| k.as_str() != META_KEY && k.as_str() != STATE_META_KEY && !k.starts_with("sys_"))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         })
